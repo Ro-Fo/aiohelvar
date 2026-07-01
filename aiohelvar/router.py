@@ -77,6 +77,14 @@ class Router:
 
         self.connected = False
 
+        # Connection state. Populated by open()/connect(); initialised here so
+        # that disconnect() is safe to call even if we never connected.
+        self._reader = None
+        self._writer = None
+        self._stream_reader_task = None
+        self._stream_writer_task = None
+        self._keep_alive_task = None
+
         self.workgroup_name = None
 
     @property
@@ -87,8 +95,15 @@ class Router:
 
         return self._router_id
 
-    async def connect(self):
-        _LOGGER.debug("Connecting...")
+    async def open(self):
+        """Open the TCP connection and start the stream reader/writer tasks.
+
+        This performs no HelvarNet queries and starts no keepalive, so it cannot
+        block waiting for a router reply. It is the low-level primitive shared by
+        connect() and used by the read-only diagnostics, which need the command
+        machinery running but want to bound every query with their own timeout.
+        """
+        _LOGGER.debug(f"Opening connection to {self.host}:{self.port}...")
 
         try:
             self._reader, self._writer = await asyncio.open_connection(
@@ -96,8 +111,7 @@ class Router:
             )
         except ConnectionError as e:
             _LOGGER.error(
-                f"Connection error while connecting to router {self.host}:{self.port} - ",
-                e,
+                f"Connection error while connecting to router {self.host}:{self.port} - {e}"
             )
             raise
         self.connected = True
@@ -107,6 +121,11 @@ class Router:
         self._stream_writer_task = asyncio.create_task(
             self._stream_writer(self._reader, self._writer)
         )
+
+    async def connect(self):
+        _LOGGER.debug("Connecting...")
+
+        await self.open()
 
         # Read the workgroup name:
         response = await self._send_command_task(
@@ -133,8 +152,9 @@ class Router:
             if task is not None:
                 task.cancel()
 
-        self._writer.close()
-        await self._writer.wait_closed()
+        if self._writer is not None:
+            self._writer.close()
+            await self._writer.wait_closed()
         self.connected = False
         _LOGGER.info("Disconnected.")
 
@@ -310,6 +330,19 @@ class Router:
         assume the router executes commands in the order it received them.
         """
         return asyncio.create_task(self._send_command_task(command))
+
+    async def query(self, command: Command, timeout: float = None):
+        """Send a command and await its response, optionally bounded by a timeout.
+
+        Unlike send_command(), which returns a task, this awaits the reply and
+        returns the response Command. If ``timeout`` (seconds) is given and no
+        reply arrives in time, asyncio.TimeoutError is raised instead of blocking
+        for the full default COMMAND_RESPONSE_TIMEOUT. Read-only callers such as
+        the diagnostics use this to probe a router without ever hanging.
+        """
+        if timeout is None:
+            return await self._send_command_task(command)
+        return await asyncio.wait_for(self._send_command_task(command), timeout)
 
     async def send_string(self, string: str):
         await self.commands_to_send.put(bytes(string, "utf-8"))

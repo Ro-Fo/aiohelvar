@@ -17,6 +17,68 @@ Very much a work in progress. Known TODOS:
 * Support relative changes to scene levels update commands
 * Better test coverage
 
+## Diagnostics & testing tools
+
+Two read-only tools ship with the library to make it easy to test connectivity
+and behaviour from a console (for example on the Raspberry Pi running Home
+Assistant) **without touching device state and without any of your own data**.
+
+### `diagnose` - read-only connection / version / capability check
+
+```bash
+python -m aiohelvar diagnose <router-host> [--port 50000] [--timeout 5] [--json]
+```
+
+It opens a connection, then runs a short sequence of read-only queries
+(workgroup name, router & HelvarNet version, clusters, groups, device
+discovery), each bounded by a timeout so it never hangs. It prints a report and
+a verdict, and exits `0` if the router looks compatible or `1` otherwise (handy
+for scripting). Example against an old firmware:
+
+```
+Device discovery    : ERROR   -> error 15: Invalid message command
+Verdict: WARNING - Router reachable, but device discovery (query C:100) is not
+supported by this firmware (error 15: Invalid message command). ...
+```
+
+Error code 15 ("Invalid message command") is the tell-tale sign that a router's
+firmware does not implement a query - i.e. a firmware/capability limit rather
+than a wiring or network fault. See `aiohelvar/error_codes.py` for the full
+HelvarNet error-code table.
+
+### `mock` - a fake router to test against
+
+```bash
+python -m aiohelvar mock [--profile modern|legacy] [--host 127.0.0.1] [--port 50000]
+```
+
+Starts an in-process HelvarNet server so you can exercise the diagnostics (or
+Home Assistant) without real hardware:
+
+* `modern` answers every query.
+* `legacy` answers version/cluster queries but rejects device discovery,
+  workgroup name and group enumeration with error 15 - reproducing the
+  "it hangs / finds nothing" situation seen on older routers.
+
+Flip a running mock between profiles from the console (it prints its PID on
+start):
+
+```bash
+kill -HUP <pid>
+```
+
+These are also usable from your own async code:
+
+```python
+from aiohelvar.diagnostics import run_diagnostics
+report = await run_diagnostics("192.0.2.10")
+print(report.to_text())
+
+from aiohelvar.mock_router import MockRouter, LEGACY
+async with MockRouter(LEGACY, port=0) as mock:
+    ...  # point a client at mock.host:mock.port
+```
+
 ## (Some of the) Known limitations 
 
 ### Lack of unique device IDs
