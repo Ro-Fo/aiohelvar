@@ -17,12 +17,19 @@ to query it. Parsing the payload is fully specified; **sending** the request is
 best-effort (the request wire-format, e.g. the exact address form and whether
 ``A:1`` is required, should be confirmed against real hardware - every query is
 timeout-bounded, so a mismatch fails cleanly rather than hanging).
+
+**Hardware support.** These are DALI-2 features on newer routers (e.g. the 950
+with DALI-2 Type 51/52 devices). Older routers (905/910/920) and old firmware do
+not implement C:252/C:253 and answer with error 15 ("Invalid message command").
+The query helpers guard against this: on such hardware they raise
+:class:`DALI2NotSupportedError` immediately instead of returning bogus data, so
+calling them on an unsupported router fails loudly and clearly.
 """
 
 import logging
 from typing import Dict, List, Optional, Tuple
 
-from .error_codes import coerce_error_code, describe
+from .error_codes import coerce_error_code, describe, is_unsupported_command
 from .parser.command import Command
 from .parser.command_parameter import CommandParameter, CommandParameterType
 from .parser.command_type import CommandType, MessageType
@@ -54,6 +61,26 @@ class DALI2QueryError(Exception):
         super().__init__(
             f"DALI-2 query to {address} failed: error {error_code} "
             f"({describe(error_code)})"
+        )
+
+
+class DALI2NotSupportedError(DALI2QueryError):
+    """Raised when the router/firmware doesn't support DALI-2 queries at all.
+
+    This is the "wrong hardware" case: the router answered C:252/C:253 with an
+    "unsupported command" error (typically 15). DALI-2 energy/diagnostics needs a
+    newer router such as the 950; older routers (905/910/920) do not implement
+    it.
+    """
+
+    def __init__(self, address, error_code):
+        # Reuse the base formatting but make the cause explicit.
+        super().__init__(address, error_code)
+        self.args = (
+            f"DALI-2 energy/diagnostics (C:252/C:253) is not supported by this "
+            f"router/firmware (error {error_code}: {describe(error_code)}). This "
+            f"is a DALI-2 feature on newer routers such as the 950; older routers "
+            f"(905/910/920) do not implement it.",
         )
 
 
@@ -148,6 +175,10 @@ async def _query(router, command_type: CommandType, address, timeout) -> DALI2Re
     if response is None:
         raise DALI2QueryError(address, None)
     if response.command_message_type == MessageType.ERROR:
+        # "Unsupported command" (error 15) => wrong hardware/firmware: refuse
+        # loudly rather than pretending a DALI-2 read is possible here.
+        if is_unsupported_command(response.result):
+            raise DALI2NotSupportedError(address, response.result)
         raise DALI2QueryError(address, response.result)
     return parse_dali2_result(response.result)
 

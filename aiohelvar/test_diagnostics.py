@@ -117,6 +117,7 @@ async def test_diagnostics_modern_router():
     assert report.workgroup_name == "MockWorkgroup"
     assert report.router_version == "5.4.2"
     assert report.helvarnet_version == "2"
+    assert report.routers == "1,2"  # read-only C:102 report of routers in cluster
     assert report.supports_device_discovery is True
     level, _ = report.verdict()
     assert level == "ok"

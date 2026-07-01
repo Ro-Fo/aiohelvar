@@ -12,10 +12,9 @@ Features:
 
 Very much a work in progress. Known TODOS:
 
-* Multi-cluster support - device discovery now enumerates the routers in the
-  *connected* cluster (via QUERY_ROUTERS, C:102) instead of only the router you
-  connected to; discovery across *other* clusters (via the cluster masters) is
-  still TODO
+* Multi-cluster / multi-router support - device discovery still targets only the
+  router you connect to. The diagnostics *report* the other routers in the
+  cluster (QUERY_ROUTERS, C:102); enumerating devices across them is still TODO
 * Sensor support
 * Support relative changes to scene levels update commands
 * Full DALI-2 energy (C:252) / diagnostics (C:253) support - reply payloads are
@@ -97,17 +96,19 @@ or when the router is reached on an unrelated IP (e.g. via a bridge), pass
 API/TCP port is `50000`; `60005` is the separate inter-router *cluster comms*
 port.
 
-### Multi-router discovery & DALI-2
+### DALI-2 energy & diagnostics (newer routers only)
 
-`Router.discover_topology()` returns `{cluster_id: [router_ids]}` for the
-connected cluster (best-effort, read-only); device discovery uses it to
-enumerate every router in the cluster, not just the one you connected to. DALI-2
-energy and diagnostics can be read per device:
+DALI-2 energy (C:252) and diagnostics (C:253) can be read per device on routers
+that support them (e.g. the 950). On older routers (905/910/920) the query
+raises `DALI2NotSupportedError` rather than returning bogus data:
 
 ```python
 result = await router.query_dali2_energy(device_address)
 print(result.value("ACTE"), result.status("APPP"))  # e.g. 1.234, 'unsupported'
 ```
+
+The diagnostics also *report* the other routers in the cluster (QUERY_ROUTERS,
+C:102), though device discovery itself still targets only the connected router.
 
 ## (Some of the) Known limitations 
 

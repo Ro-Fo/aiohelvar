@@ -5,6 +5,7 @@ import pytest
 from aiohelvar.dali2 import (
     UNAVAILABLE,
     UNSUPPORTED,
+    DALI2NotSupportedError,
     DALI2QueryError,
     DALI2Result,
     parse_dali2_result,
@@ -89,8 +90,8 @@ async def test_query_diagnostics_against_mock():
 
 
 @pytest.mark.asyncio
-async def test_query_energy_raises_on_error_reply():
-    # A firmware that rejects C:252 returns error 15; the query surfaces it.
+async def test_query_energy_on_unsupported_hardware_raises_not_supported():
+    # Old firmware rejects C:252 with error 15 -> a clear "not supported" error.
     profile = FirmwareProfile(
         name="no-dali2",
         unsupported_commands=frozenset({CommandType.QUERY_DALI2_ENERGY.command_id}),
@@ -99,8 +100,30 @@ async def test_query_energy_raises_on_error_reply():
         router = Router(mock.host, mock.port)
         await router.open()
         try:
-            with pytest.raises(DALI2QueryError) as excinfo:
+            with pytest.raises(DALI2NotSupportedError) as excinfo:
                 await router.query_dali2_energy(HelvarAddress(1, 2, 3, 4), timeout=2.0)
             assert excinfo.value.error_code == 15
+            assert "not supported" in str(excinfo.value)
+        finally:
+            await router.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_query_energy_other_error_is_plain_query_error():
+    # A non-"unsupported" error (e.g. 11 device does not exist) is a regular
+    # DALI2QueryError, not the not-supported subclass.
+    profile = FirmwareProfile(
+        name="dali2-but-no-device",
+        unsupported_commands=frozenset({CommandType.QUERY_DALI2_ENERGY.command_id}),
+        error_code=11,
+    )
+    async with MockRouter(profile, port=0) as mock:
+        router = Router(mock.host, mock.port)
+        await router.open()
+        try:
+            with pytest.raises(DALI2QueryError) as excinfo:
+                await router.query_dali2_energy(HelvarAddress(1, 2, 3, 4), timeout=2.0)
+            assert not isinstance(excinfo.value, DALI2NotSupportedError)
+            assert excinfo.value.error_code == 11
         finally:
             await router.disconnect()
