@@ -35,6 +35,17 @@ def test_basic_command_construction():
     assert str(command) == ">V:2,C:101,G:2#"
 
 
+def test_command_with_parameter_and_address():
+    # A command carrying both a parameter and an address serialises as
+    # "...,A:1,@addr", which used to break param parsing on the trailing comma.
+    parser = CommandParser()
+    command = parser.parse_command(b">V:2,C:252,A:1,@1.2.3.4#")
+
+    assert command.command_type == CommandType.QUERY_DALI2_ENERGY
+    assert command.command_address == HelvarAddress(1, 2, 3, 4)
+    assert command.get_param_value(CommandParameterType.ACK) == "1"
+
+
 # Address tests
 
 

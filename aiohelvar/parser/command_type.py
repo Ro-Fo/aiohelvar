@@ -5,6 +5,7 @@ class CommandType(Enum):
 
     # Queries
     QUERY_CLUSTERS = (101, "Query Clusters.")
+    QUERY_ROUTERS = (102, "Query Routers in a cluster.")
     QUERY_GROUP_DESCRIPTION = (105, "Query group description.")
     QUERY_DEVICE_DESCRIPTION = (106, "Query device description.")
     QUERY_DEVICE_TYPES_AND_ADDRESSES = (100, "Query Device Types and Addresses")
@@ -20,6 +21,12 @@ class CommandType(Enum):
     QUERY_SCENE_NAMES = (166, "Query all scene names in group.")
     QUERY_ROUTER_VERSION = (190, "Query the router software version.")
     QUERY_HELVARNET_VERSION = (191, "Query the HelvarNet software version.")
+    # DALI-2 device queries (Helvar Designer Release Notes, Appendix 2).
+    # Recognised so replies aren't rejected as unknown commands; parsing of
+    # their named-value payloads (e.g. ACTE:1.234) and the "@:" address form,
+    # plus the -1/-2 "unsupported"/"unavailable" sentinels, is future work.
+    QUERY_DALI2_ENERGY = (252, "Query DALI-2 Type 51 energy reporting (IEC 62386-252).")
+    QUERY_DALI2_DIAGNOSTICS = (253, "Query DALI-2 Type 52 diagnostics & maintenance (IEC 62386-253).")
 
     # Commands
     DIRECT_LEVEL_DEVICE = (14, "Direct Level, Device")

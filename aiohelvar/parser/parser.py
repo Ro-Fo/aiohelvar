@@ -80,6 +80,11 @@ class CommandParser:
             params = match.group("params").split(",")
 
             for param in params:
+                # A command that carries both parameters and an address
+                # serialises as "...,X:y,@addr", so splitting the params group
+                # on commas can leave an empty trailing segment. Skip it.
+                if not param.strip():
+                    continue
                 parts = param.split(":")
                 if len(parts) == 2:
                     try:

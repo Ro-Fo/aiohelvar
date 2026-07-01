@@ -31,9 +31,22 @@ class Router:
     """Control a Helvar Router."""
 
     def __init__(self, host, port, cluster_id=0, router_id=1, use_specified_ids=False):
+        """Create a Router.
+
+        When ``use_specified_ids`` is False (the default) the HelvarNet cluster
+        and router ids are derived from an IPv4 host as cluster = 3rd octet,
+        router = 4th octet. Per the Designer 5 Quick Start Guide (section 3.4,
+        "Clusters: cluster masks and Router IDs") this is only correct for the
+        Helvar default cluster mask 255.255.255.0 with the usual 10.254.C.R
+        layout. For other cluster masks, or when the router is reached on an
+        unrelated IP (e.g. via a bridge on a 192.168.x.y network), the derived
+        ids will be wrong - pass ``cluster_id``/``router_id`` with
+        ``use_specified_ids=True`` instead. (Note: the HelvarNet API/TCP port is
+        50000; 60005 is the separate inter-router "cluster comms" port.)
+        """
         self.host = host
         self.port = port
-        
+
         # Check if we should use specified IDs or extract from IP address
         if use_specified_ids:
             # Use the provided cluster_id and router_id values
@@ -77,6 +90,14 @@ class Router:
 
         self.connected = False
 
+        # Connection state. Populated by open()/connect(); initialised here so
+        # that disconnect() is safe to call even if we never connected.
+        self._reader = None
+        self._writer = None
+        self._stream_reader_task = None
+        self._stream_writer_task = None
+        self._keep_alive_task = None
+
         self.workgroup_name = None
 
     @property
@@ -87,8 +108,15 @@ class Router:
 
         return self._router_id
 
-    async def connect(self):
-        _LOGGER.debug("Connecting...")
+    async def open(self):
+        """Open the TCP connection and start the stream reader/writer tasks.
+
+        This performs no HelvarNet queries and starts no keepalive, so it cannot
+        block waiting for a router reply. It is the low-level primitive shared by
+        connect() and used by the read-only diagnostics, which need the command
+        machinery running but want to bound every query with their own timeout.
+        """
+        _LOGGER.debug(f"Opening connection to {self.host}:{self.port}...")
 
         try:
             self._reader, self._writer = await asyncio.open_connection(
@@ -96,8 +124,7 @@ class Router:
             )
         except ConnectionError as e:
             _LOGGER.error(
-                f"Connection error while connecting to router {self.host}:{self.port} - ",
-                e,
+                f"Connection error while connecting to router {self.host}:{self.port} - {e}"
             )
             raise
         self.connected = True
@@ -107,6 +134,11 @@ class Router:
         self._stream_writer_task = asyncio.create_task(
             self._stream_writer(self._reader, self._writer)
         )
+
+    async def connect(self):
+        _LOGGER.debug("Connecting...")
+
+        await self.open()
 
         # Read the workgroup name:
         response = await self._send_command_task(
@@ -133,8 +165,9 @@ class Router:
             if task is not None:
                 task.cancel()
 
-        self._writer.close()
-        await self._writer.wait_closed()
+        if self._writer is not None:
+            self._writer.close()
+            await self._writer.wait_closed()
         self.connected = False
         _LOGGER.info("Disconnected.")
 
@@ -310,6 +343,39 @@ class Router:
         assume the router executes commands in the order it received them.
         """
         return asyncio.create_task(self._send_command_task(command))
+
+    async def query(self, command: Command, timeout: float = None):
+        """Send a command and await its response, optionally bounded by a timeout.
+
+        Unlike send_command(), which returns a task, this awaits the reply and
+        returns the response Command. If ``timeout`` (seconds) is given and no
+        reply arrives in time, asyncio.TimeoutError is raised instead of blocking
+        for the full default COMMAND_RESPONSE_TIMEOUT. Read-only callers such as
+        the diagnostics use this to probe a router without ever hanging.
+        """
+        if timeout is None:
+            return await self._send_command_task(command)
+        return await asyncio.wait_for(self._send_command_task(command), timeout)
+
+    async def query_dali2_energy(self, address, timeout: float = None):
+        """Query DALI-2 energy reporting (C:252) for a device. Returns a DALI2Result.
+
+        DALI-2 feature for newer routers (e.g. 950). On routers that don't support
+        it (905/910/920, old firmware) this raises DALI2NotSupportedError.
+        """
+        from .dali2 import query_energy
+
+        return await query_energy(self, address, timeout)
+
+    async def query_dali2_diagnostics(self, address, timeout: float = None):
+        """Query DALI-2 diagnostics & maintenance (C:253). Returns a DALI2Result.
+
+        DALI-2 feature for newer routers (e.g. 950). On routers that don't support
+        it (905/910/920, old firmware) this raises DALI2NotSupportedError.
+        """
+        from .dali2 import query_diagnostics
+
+        return await query_diagnostics(self, address, timeout)
 
     async def send_string(self, string: str):
         await self.commands_to_send.put(bytes(string, "utf-8"))
