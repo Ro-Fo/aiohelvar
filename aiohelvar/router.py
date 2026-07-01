@@ -357,6 +357,63 @@ class Router:
             return await self._send_command_task(command)
         return await asyncio.wait_for(self._send_command_task(command), timeout)
 
+    async def discover_topology(self, timeout: float = None):
+        """Best-effort, read-only discovery of the routers in this cluster.
+
+        Queries QUERY_ROUTERS (C:102) and returns ``{cluster_id: [router_ids]}``
+        for the connected router's cluster. Falls back to just this router when
+        the query is unsupported (older firmware answers error 15), times out, or
+        returns nothing - so callers never end up with *fewer* routers than the
+        one they connected to.
+
+        Reply-format assumption: a comma-separated list of router ids (an entry
+        may also be a dotted ``cluster.router``, in which case the router id is
+        the last part). This matches the common HelvarNet list format; verify
+        against your hardware. Parsing degrades safely on anything unexpected.
+        """
+        fallback = {self.cluster_id: [self.router_id]}
+        try:
+            response = await self.query(Command(CommandType.QUERY_ROUTERS), timeout=timeout)
+        except Exception as err:
+            _LOGGER.debug("Topology discovery (C:102) failed: %r", err)
+            return fallback
+
+        if (
+            response is None
+            or response.command_message_type != MessageType.REPLY
+            or not response.result
+        ):
+            return fallback
+
+        routers = []
+        for token in response.result.split(","):
+            token = token.strip().lstrip("@")
+            if not token:
+                continue
+            part = token.split(".")[-1]  # "c.r" -> "r", or just "r"
+            try:
+                routers.append(int(part))
+            except ValueError:
+                continue
+
+        if not routers:
+            return fallback
+        if self.router_id not in routers:
+            routers.append(self.router_id)
+        return {self.cluster_id: sorted(set(routers))}
+
+    async def query_dali2_energy(self, address, timeout: float = None):
+        """Query DALI-2 energy reporting (C:252) for a device. Returns a DALI2Result."""
+        from .dali2 import query_energy
+
+        return await query_energy(self, address, timeout)
+
+    async def query_dali2_diagnostics(self, address, timeout: float = None):
+        """Query DALI-2 diagnostics & maintenance (C:253). Returns a DALI2Result."""
+        from .dali2 import query_diagnostics
+
+        return await query_diagnostics(self, address, timeout)
+
     async def send_string(self, string: str):
         await self.commands_to_send.put(bytes(string, "utf-8"))
 

@@ -5,6 +5,7 @@ class CommandType(Enum):
 
     # Queries
     QUERY_CLUSTERS = (101, "Query Clusters.")
+    QUERY_ROUTERS = (102, "Query Routers in a cluster.")
     QUERY_GROUP_DESCRIPTION = (105, "Query group description.")
     QUERY_DEVICE_DESCRIPTION = (106, "Query device description.")
     QUERY_DEVICE_TYPES_AND_ADDRESSES = (100, "Query Device Types and Addresses")

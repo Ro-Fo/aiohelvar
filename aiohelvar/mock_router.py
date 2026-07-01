@@ -71,6 +71,7 @@ class FirmwareProfile:
 
 # Command ids referenced below (kept inline for readability).
 _C_CLUSTERS = CommandType.QUERY_CLUSTERS.command_id  # 101
+_C_ROUTERS = CommandType.QUERY_ROUTERS.command_id  # 102
 _C_GROUP_DESC = CommandType.QUERY_GROUP_DESCRIPTION.command_id  # 105
 _C_DEVICE_DESC = CommandType.QUERY_DEVICE_DESCRIPTION.command_id  # 106
 _C_DEVICE_DISCOVERY = CommandType.QUERY_DEVICE_TYPES_AND_ADDRESSES.command_id  # 100
@@ -82,6 +83,8 @@ _C_GROUP = CommandType.QUERY_GROUP.command_id  # 164
 _C_GROUPS = CommandType.QUERY_GROUPS.command_id  # 165
 _C_ROUTER_VERSION = CommandType.QUERY_ROUTER_VERSION.command_id  # 190
 _C_HELVARNET_VERSION = CommandType.QUERY_HELVARNET_VERSION.command_id  # 191
+_C_DALI2_ENERGY = CommandType.QUERY_DALI2_ENERGY.command_id  # 252
+_C_DALI2_DIAGNOSTICS = CommandType.QUERY_DALI2_DIAGNOSTICS.command_id  # 253
 
 
 # Synthetic, generic reply payloads shared by the built-in profiles.
@@ -90,6 +93,7 @@ _MODERN_RESULTS = {
     _C_ROUTER_VERSION: "5.4.2",
     _C_HELVARNET_VERSION: "2",
     _C_CLUSTERS: "1",
+    _C_ROUTERS: "1,2",  # two routers in the cluster
     _C_GROUPS: "1,2",
     # type@device pairs; values are synthetic (a DALI load and a DALI switch).
     _C_DEVICE_DISCOVERY: "1@1,1@2",
@@ -99,6 +103,9 @@ _MODERN_RESULTS = {
     _C_DEVICE_STATE: "0",
     _C_LOAD_LEVEL: "0.0",
     _C_ROUTER_TIME: "0",
+    # Synthetic DALI-2 payloads; APPP is -1 (unsupported bank) to exercise sentinels.
+    _C_DALI2_ENERGY: "ACTE:1.234,ACTP:5.678,APPE:4.321,APPP:-1,ACTEL:9.001,ACTPL:1.009",
+    _C_DALI2_DIAGNOSTICS: "LSF:0,LSTL:-2,CGTL:42.0",
 }
 
 MODERN = FirmwareProfile(name="modern", unsupported_commands=frozenset(), results=_MODERN_RESULTS)

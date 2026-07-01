@@ -12,12 +12,16 @@ Features:
 
 Very much a work in progress. Known TODOS:
 
-* Cluster support - we assume cluster 0 at the moment
+* Multi-cluster support - device discovery now enumerates the routers in the
+  *connected* cluster (via QUERY_ROUTERS, C:102) instead of only the router you
+  connected to; discovery across *other* clusters (via the cluster masters) is
+  still TODO
 * Sensor support
 * Support relative changes to scene levels update commands
-* Full DALI-2 energy (C:252) / diagnostics (C:253) support - the command types
-  are now recognised, but parsing their named-value replies (e.g. `ACTE:1.234`,
-  with `-1`/`-2` sentinels for unsupported/unavailable) is still TODO
+* Full DALI-2 energy (C:252) / diagnostics (C:253) support - reply payloads are
+  now parsed (see `dali2.py`; `-1`/`-2` map to unsupported/unavailable) and can
+  be queried with `Router.query_dali2_energy()` / `query_dali2_diagnostics()`.
+  The request wire-format is best-effort and should be confirmed on hardware
 * Better test coverage
 
 ## Diagnostics & testing tools
@@ -92,6 +96,18 @@ or when the router is reached on an unrelated IP (e.g. via a bridge), pass
 `cluster_id`/`router_id` with `use_specified_ids=True`. Note the HelvarNet
 API/TCP port is `50000`; `60005` is the separate inter-router *cluster comms*
 port.
+
+### Multi-router discovery & DALI-2
+
+`Router.discover_topology()` returns `{cluster_id: [router_ids]}` for the
+connected cluster (best-effort, read-only); device discovery uses it to
+enumerate every router in the cluster, not just the one you connected to. DALI-2
+energy and diagnostics can be read per device:
+
+```python
+result = await router.query_dali2_energy(device_address)
+print(result.value("ACTE"), result.status("APPP"))  # e.g. 1.234, 'unsupported'
+```
 
 ## (Some of the) Known limitations 
 

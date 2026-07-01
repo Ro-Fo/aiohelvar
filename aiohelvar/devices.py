@@ -369,17 +369,30 @@ async def receive_and_register_devices(router, command):
 
 async def get_devices(router):
 
-    [
-        asyncio.create_task(
-            receive_and_register_devices(
-                router,
-                Command(
-                    CommandType.QUERY_DEVICE_TYPES_AND_ADDRESSES,
-                    command_address=HelvarAddress(
-                        router.cluster_id, router.router_id, subnet_id
-                    ),
-                ),
-            )
-        )
-        for subnet_id in range(1, 5)
-    ]
+    # Discover the routers in this cluster and probe each of them, so a
+    # multi-router cluster is fully enumerated instead of only the router we
+    # connected to. discover_topology() always includes the connected router,
+    # so this never finds fewer devices than before.
+    topology = await router.discover_topology()
+    topology.setdefault(router.cluster_id, [])
+    if router.router_id not in topology[router.cluster_id]:
+        topology[router.cluster_id].append(router.router_id)
+
+    tasks = []
+    for cluster_id, router_ids in topology.items():
+        for router_id in router_ids:
+            for subnet_id in range(1, 5):
+                tasks.append(
+                    asyncio.create_task(
+                        receive_and_register_devices(
+                            router,
+                            Command(
+                                CommandType.QUERY_DEVICE_TYPES_AND_ADDRESSES,
+                                command_address=HelvarAddress(
+                                    cluster_id, router_id, subnet_id
+                                ),
+                            ),
+                        )
+                    )
+                )
+    return tasks

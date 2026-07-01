@@ -83,6 +83,7 @@ CMD_WORKGROUP = CommandType.QUERY_WORKGROUP_NAME.command_id  # 107
 CMD_ROUTER_VERSION = CommandType.QUERY_ROUTER_VERSION.command_id  # 190
 CMD_HELVARNET_VERSION = CommandType.QUERY_HELVARNET_VERSION.command_id  # 191
 CMD_CLUSTERS = CommandType.QUERY_CLUSTERS.command_id  # 101
+CMD_ROUTERS = CommandType.QUERY_ROUTERS.command_id  # 102
 CMD_GROUPS = CommandType.QUERY_GROUPS.command_id  # 165
 CMD_DEVICE_DISCOVERY = CommandType.QUERY_DEVICE_TYPES_AND_ADDRESSES.command_id  # 100
 
@@ -141,6 +142,10 @@ class DiagnosticsReport:
     @property
     def clusters(self) -> Optional[str]:
         return self._result_if_ok(CMD_CLUSTERS)
+
+    @property
+    def routers(self) -> Optional[str]:
+        return self._result_if_ok(CMD_ROUTERS)
 
     @property
     def supports_device_discovery(self) -> Optional[bool]:
@@ -205,6 +210,7 @@ class DiagnosticsReport:
             "router_version": self.router_version,
             "helvarnet_version": self.helvarnet_version,
             "clusters": self.clusters,
+            "routers": self.routers,
             "supports_device_discovery": self.supports_device_discovery,
             "supports_groups": self.supports_groups,
             "verdict": {"level": level, "message": message},
@@ -240,6 +246,7 @@ _PROBE_PLAN = [
     ("Router version", CMD_ROUTER_VERSION, False),
     ("HelvarNet version", CMD_HELVARNET_VERSION, False),
     ("Clusters", CMD_CLUSTERS, False),
+    ("Routers", CMD_ROUTERS, False),
     ("Groups", CMD_GROUPS, False),
     ("Device discovery", CMD_DEVICE_DISCOVERY, True),
 ]
