@@ -31,9 +31,22 @@ class Router:
     """Control a Helvar Router."""
 
     def __init__(self, host, port, cluster_id=0, router_id=1, use_specified_ids=False):
+        """Create a Router.
+
+        When ``use_specified_ids`` is False (the default) the HelvarNet cluster
+        and router ids are derived from an IPv4 host as cluster = 3rd octet,
+        router = 4th octet. Per the Designer 5 Quick Start Guide (section 3.4,
+        "Clusters: cluster masks and Router IDs") this is only correct for the
+        Helvar default cluster mask 255.255.255.0 with the usual 10.254.C.R
+        layout. For other cluster masks, or when the router is reached on an
+        unrelated IP (e.g. via a bridge on a 192.168.x.y network), the derived
+        ids will be wrong - pass ``cluster_id``/``router_id`` with
+        ``use_specified_ids=True`` instead. (Note: the HelvarNet API/TCP port is
+        50000; 60005 is the separate inter-router "cluster comms" port.)
+        """
         self.host = host
         self.port = port
-        
+
         # Check if we should use specified IDs or extract from IP address
         if use_specified_ids:
             # Use the provided cluster_id and router_id values

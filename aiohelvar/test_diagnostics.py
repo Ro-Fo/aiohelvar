@@ -63,6 +63,14 @@ class TestErrorCodes:
         assert HelvarErrorCode.INVALID_MESSAGE_COMMAND == 15
 
 
+class TestCommandTypes:
+    def test_dali2_commands_are_recognised(self):
+        # DALI-2 energy/diagnostics commands from the Helvar docs are known,
+        # so replies referencing them aren't rejected as unknown commands.
+        assert CommandType.get_by_command_id(252) is CommandType.QUERY_DALI2_ENERGY
+        assert CommandType.get_by_command_id(253) is CommandType.QUERY_DALI2_DIAGNOSTICS
+
+
 # --- mock router (pure, no network) --------------------------------------
 
 

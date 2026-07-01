@@ -15,6 +15,9 @@ Very much a work in progress. Known TODOS:
 * Cluster support - we assume cluster 0 at the moment
 * Sensor support
 * Support relative changes to scene levels update commands
+* Full DALI-2 energy (C:252) / diagnostics (C:253) support - the command types
+  are now recognised, but parsing their named-value replies (e.g. `ACTE:1.234`,
+  with `-1`/`-2` sentinels for unsupported/unavailable) is still TODO
 * Better test coverage
 
 ## Diagnostics & testing tools
@@ -78,6 +81,17 @@ from aiohelvar.mock_router import MockRouter, LEGACY
 async with MockRouter(LEGACY, port=0) as mock:
     ...  # point a client at mock.host:mock.port
 ```
+
+### Addressing & ports
+
+The HelvarNet `@cluster.router` address is derived from the router's IP using
+its *cluster mask* (Designer 5 Quick Start Guide §3.4). With the Helvar default
+mask `255.255.255.0` and the usual `10.254.C.R` layout, cluster = 3rd octet and
+router = 4th octet, which is what `Router` assumes by default. For other masks
+or when the router is reached on an unrelated IP (e.g. via a bridge), pass
+`cluster_id`/`router_id` with `use_specified_ids=True`. Note the HelvarNet
+API/TCP port is `50000`; `60005` is the separate inter-router *cluster comms*
+port.
 
 ## (Some of the) Known limitations 
 

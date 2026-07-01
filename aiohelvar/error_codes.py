@@ -14,6 +14,12 @@ across firmware revisions. If you hit a code that is not listed here, please
 double-check against the current HelvarNet documentation and add it.
 
 Reference: HelvarNet Overview, "Error / Diagnostic Messages".
+
+The subset of codes used below is independently corroborated by the Helvar
+Designer Release Notes (Appendix 2, HelvarNet C:252/C:253 examples), which show
+error 11 for a query to a device that does not exist, error 5 for a query with
+no device address, and errors 12/17 for parameter problems - all matching the
+descriptions here.
 """
 
 from enum import IntEnum
