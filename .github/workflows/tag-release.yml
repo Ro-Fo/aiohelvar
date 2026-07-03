@@ -1,14 +1,8 @@
 name: Tag release
 
 on:
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Tag name (e.g. v0.11.0)"
-        required: true
-      sha:
-        description: "Commit SHA the tag should point at"
-        required: true
+  push:
+    branches: ["chore/tag-v0.11.0"]
 
 permissions:
   contents: write
@@ -20,11 +14,20 @@ jobs:
       - uses: actions/github-script@v7
         with:
           script: |
-            const { tag, sha } = context.payload.inputs;
-            await github.rest.git.createRef({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              ref: `refs/tags/${tag}`,
-              sha,
-            });
-            core.notice(`Created tag ${tag} -> ${sha}`);
+            const tag = "v0.11.0";
+            const sha = "afb1bdbec2d836301defa9a31e4e170a36de8709"; // merge commit on main
+            try {
+              await github.rest.git.createRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: `refs/tags/${tag}`,
+                sha,
+              });
+              core.notice(`Created tag ${tag} -> ${sha}`);
+            } catch (err) {
+              if (`${err}`.includes("Reference already exists")) {
+                core.notice(`Tag ${tag} already exists`);
+              } else {
+                throw err;
+              }
+            }
