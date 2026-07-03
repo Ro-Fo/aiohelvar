@@ -1,6 +1,8 @@
 from aiohelvar.parser.command_parameter import CommandParameterType
 from .devices import Devices, get_devices
 from .groups import Groups, get_groups
+from .lib import parse_id_list
+from .parser.address import HelvarAddress
 from .scenes import Scenes, get_scenes
 from .parser.parser import CommandParser
 from .parser.command_type import (
@@ -26,6 +28,10 @@ COMMAND_RESPONSE_TIMEOUT = 30
 
 KEEP_ALIVE_PERIOD = 120
 
+# Bound for the cluster/router id discovery queries run right after connecting.
+# Discovery must never hang a connection attempt for the full command timeout.
+DISCOVERY_TIMEOUT = 10
+
 
 class Router:
     """Control a Helvar Router."""
@@ -33,45 +39,47 @@ class Router:
     def __init__(self, host, port, cluster_id=0, router_id=1, use_specified_ids=False):
         """Create a Router.
 
-        When ``use_specified_ids`` is False (the default) the HelvarNet cluster
-        and router ids are derived from an IPv4 host as cluster = 3rd octet,
-        router = 4th octet. Per the Designer 5 Quick Start Guide (section 3.4,
-        "Clusters: cluster masks and Router IDs") this is only correct for the
-        Helvar default cluster mask 255.255.255.0 with the usual 10.254.C.R
-        layout. For other cluster masks, or when the router is reached on an
-        unrelated IP (e.g. via a bridge on a 192.168.x.y network), the derived
-        ids will be wrong - pass ``cluster_id``/``router_id`` with
-        ``use_specified_ids=True`` instead. (Note: the HelvarNet API/TCP port is
-        50000; 60005 is the separate inter-router "cluster comms" port.)
+        The HelvarNet cluster and router ids are discovered from the router
+        itself right after connecting (QUERY_CLUSTERS C:101 + QUERY_ROUTERS
+        C:102) - see :meth:`discover_router_ids`. This works regardless of how
+        the router is addressed on the LAN.
+
+        Before discovery has run (and as a last-resort fallback if both
+        discovery queries fail) the ids are guessed from an IPv4 host as
+        cluster = 3rd octet, router = 4th octet. Per the Designer 5 Quick Start
+        Guide (section 3.4, "Clusters: cluster masks and Router IDs") that
+        heuristic is only correct for the Helvar default cluster mask
+        255.255.255.0 with the usual 10.254.C.R layout - on e.g. a 192.168.x.y
+        network it probes a non-existent cluster (HelvarNet error 9), which is
+        why runtime discovery is the default.
+
+        Pass ``cluster_id``/``router_id`` with ``use_specified_ids=True`` to
+        skip discovery and force specific ids. (Note: the HelvarNet API/TCP
+        port is 50000; 60005 is the separate inter-router "cluster comms"
+        port.)
         """
         self.host = host
         self.port = port
 
-        # Check if we should use specified IDs or extract from IP address
+        self._use_specified_ids = use_specified_ids
+
+        # Discovered topology; populated by discover_router_ids().
+        self.clusters = []
+        self.cluster_routers = {}
+        self.ids_discovered = False
+        self._discovery_attempted = False
+
         if use_specified_ids:
             # Use the provided cluster_id and router_id values
             _LOGGER.debug(f"Using specified IDs: cluster_id={cluster_id}, router_id={router_id}")
             self.cluster_id = cluster_id
             self.router_id = router_id
         else:
-            # Check if host is a valid IP address and extract cluster_id and router_id
-            try:
-                ip = ipaddress.ip_address(host)
-                if isinstance(ip, ipaddress.IPv4Address):
-                    octets = str(ip).split('.')
-                    self.cluster_id = int(octets[2])  # 3rd octet
-                    self.router_id = int(octets[3])   # 4th octet
-                    _LOGGER.debug(f"Extracted IDs from IPv4 address {host}: cluster_id={self.cluster_id}, router_id={self.router_id}")
-                else:
-                    # For IPv6 or if we can't parse octets, use provided values
-                    _LOGGER.debug(f"IPv6 address {host} detected, using provided values: cluster_id={cluster_id}, router_id={router_id}")
-                    self.cluster_id = cluster_id
-                    self.router_id = router_id
-            except ValueError:
-                # Not a valid IP address, use provided values
-                _LOGGER.debug(f"Invalid IP address '{host}', using provided values: cluster_id={cluster_id}, router_id={router_id}")
-                self.cluster_id = cluster_id
-                self.router_id = router_id
+            # Initial guess until discovery runs: derive from an IPv4 host,
+            # falling back to the provided defaults.
+            self.cluster_id, self.router_id = self._ids_from_host(
+                host, cluster_id, router_id
+            )
 
         self.config = None
 
@@ -99,6 +107,38 @@ class Router:
         self._keep_alive_task = None
 
         self.workgroup_name = None
+
+    @staticmethod
+    def _ids_from_host(host, default_cluster_id, default_router_id):
+        """Guess (cluster_id, router_id) from an IPv4 host address.
+
+        Only correct on the Helvar 10.254.C.R addressing convention; used as an
+        initial value and as a last-resort fallback when runtime discovery
+        fails.
+        """
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            _LOGGER.debug(
+                f"Host '{host}' is not an IP address, using provided values: "
+                f"cluster_id={default_cluster_id}, router_id={default_router_id}"
+            )
+            return default_cluster_id, default_router_id
+
+        if isinstance(ip, ipaddress.IPv4Address):
+            octets = str(ip).split(".")
+            cluster_id = int(octets[2])  # 3rd octet
+            router_id = int(octets[3])  # 4th octet
+            _LOGGER.debug(
+                f"Guessed IDs from IPv4 address {host}: cluster_id={cluster_id}, router_id={router_id}"
+            )
+            return cluster_id, router_id
+
+        _LOGGER.debug(
+            f"IPv6 address {host} detected, using provided values: "
+            f"cluster_id={default_cluster_id}, router_id={default_router_id}"
+        )
+        return default_cluster_id, default_router_id
 
     @property
     def id(self):
@@ -146,8 +186,102 @@ class Router:
         )
         self.workgroup_name = response.result
 
+        # Discover the real cluster/router ids from the router itself.
+        await self.discover_router_ids()
+
         # Kick off the keepalive task
         self._keep_alive_task = asyncio.create_task(self._keep_alive())
+
+    async def discover_router_ids(self):
+        """Discover the cluster and router ids from the connected router.
+
+        Sends QUERY_CLUSTERS (C:101) and then QUERY_ROUTERS (C:102) per
+        cluster. Real firmware requires the cluster as the address parameter
+        of C:102 (">V:2,C:102,@<cluster>#"); a bare C:102 is answered with
+        error 17 ("Missing ASCII parameter").
+
+        The first discovered cluster/router pair becomes this Router's
+        cluster_id/router_id. The full topology is kept in ``self.clusters``
+        and ``self.cluster_routers``. Skipped when the Router was created with
+        ``use_specified_ids=True``. If both discovery queries fail, the
+        IP-derived heuristic ids from __init__ are kept as a last resort.
+        """
+        self._discovery_attempted = True
+
+        if self._use_specified_ids:
+            _LOGGER.debug(
+                "Skipping cluster/router discovery: using specified ids "
+                f"cluster_id={self.cluster_id}, router_id={self.router_id}"
+            )
+            return
+
+        clusters = await self._discover_clusters()
+        cluster_routers = {}
+        for cluster in clusters:
+            routers = await self._discover_routers_in_cluster(cluster)
+            if routers:
+                cluster_routers[cluster] = routers
+
+        self.clusters = clusters
+        self.cluster_routers = cluster_routers
+
+        for cluster in clusters:
+            routers = cluster_routers.get(cluster)
+            if routers:
+                self.cluster_id = cluster
+                self.router_id = routers[0]
+                self.ids_discovered = True
+                _LOGGER.info(
+                    f"Discovered HelvarNet topology {cluster_routers}; using "
+                    f"cluster_id={self.cluster_id}, router_id={self.router_id}"
+                )
+                return
+
+        _LOGGER.warning(
+            "Could not discover cluster/router ids from the router "
+            f"(clusters={clusters}, routers={cluster_routers}). Falling back "
+            f"to the IP-derived guess cluster_id={self.cluster_id}, "
+            f"router_id={self.router_id}. If device discovery fails, pass "
+            "cluster_id/router_id with use_specified_ids=True."
+        )
+
+    async def _discover_clusters(self):
+        """Return the list of cluster ids the router reports (C:101)."""
+        try:
+            response = await self.query(
+                Command(CommandType.QUERY_CLUSTERS), timeout=DISCOVERY_TIMEOUT
+            )
+        except (asyncio.TimeoutError, CommandResponseTimeout):
+            _LOGGER.warning("QUERY_CLUSTERS (C:101) timed out.")
+            return []
+
+        if response is None or response.command_message_type == MessageType.ERROR:
+            _LOGGER.warning(f"QUERY_CLUSTERS (C:101) failed: {response}")
+            return []
+
+        return parse_id_list(response.result)
+
+    async def _discover_routers_in_cluster(self, cluster_id):
+        """Return the list of router ids in a cluster (C:102, @cluster)."""
+        try:
+            response = await self.query(
+                Command(
+                    CommandType.QUERY_ROUTERS,
+                    command_address=HelvarAddress(cluster_id),
+                ),
+                timeout=DISCOVERY_TIMEOUT,
+            )
+        except (asyncio.TimeoutError, CommandResponseTimeout):
+            _LOGGER.warning(f"QUERY_ROUTERS (C:102) for cluster {cluster_id} timed out.")
+            return []
+
+        if response is None or response.command_message_type == MessageType.ERROR:
+            _LOGGER.warning(
+                f"QUERY_ROUTERS (C:102) for cluster {cluster_id} failed: {response}"
+            )
+            return []
+
+        return parse_id_list(response.result)
 
     async def reconnect(self):
         await self.disconnect()
@@ -252,14 +386,15 @@ class Router:
         if not self.connected:
             await self.connect()
 
+        # connect() runs discovery; cover callers that used open() directly.
+        if not self._discovery_attempted:
+            await self.discover_router_ids()
+
         # Get Groups
         await self.get_groups()
 
         # Get Devices
         await self.get_devices()
-
-        # Get Clusters
-        # await self.get_clusters()
 
         # Get Scenes
         await self.get_scenes()
@@ -278,13 +413,6 @@ class Router:
     async def get_scenes(self):
 
         await get_scenes(self, self.groups)
-
-    # async def get_clusters(self):
-    #     response = await self.send_command(Command(CommandType.QUERY_ROUTERS))
-
-    #     await response
-
-    #     print(response.result())
 
     async def _send_command_task(self, command: Command):
 

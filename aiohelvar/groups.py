@@ -11,10 +11,25 @@ import logging
 _LOGGER = logging.getLogger(__name__)
 
 
+# QUERY_LAST_SCENE_IN_GROUP (C:109) replies with values >= 256 when no scene
+# has been recalled in the group since power-up.
+LAST_SCENE_NONE_SENTINEL = 256
+
+
 def blockscene_to_block_and_scene(block_scene: int):
-    scene = block_scene % 16
-    block = ((block_scene - scene) / 16) + 1
-    return block, scene + 1
+    """Decode a C:109 (query last scene in group) reply value.
+
+    The router encodes the last scene as (block - 1) * 16 + scene with a
+    1-based scene, so valid values run 1..128 (verified on a 910: 71 -> 5.7,
+    15 -> 1.15, 16 -> 1.16, 18 -> 2.2). Values >= 256 are a sentinel meaning
+    "no scene recalled since power-up".
+
+    Returns a (block, scene) tuple, or None for the sentinel / invalid values.
+    """
+    if block_scene is None or block_scene < 1 or block_scene >= LAST_SCENE_NONE_SENTINEL:
+        return None
+    zero_based = block_scene - 1
+    return zero_based // 16 + 1, zero_based % 16 + 1
 
 
 class Group(Subscribable):
@@ -137,6 +152,35 @@ class Groups:
             )
         )
 
+    async def set_group_level(self, group_id: int, level, fade_time=DEFAULT_FADE_TIME):
+        """Set all channels in a group directly to a level (C:13).
+
+        Sends ">V:2,C:13,G:<group>,L:<0-100>,F:<fade>#"; the router sends no
+        reply. ``fade_time`` is in HelvarNet units of 1/100 s. Unlike a scene
+        recall, a direct level also drives channels whose scene-table entry is
+        "*" (ignore scene command), so this can force a whole group to a level
+        - e.g. 0 to switch it off.
+        """
+        level = float(level)
+        if level < 0:
+            level = 0
+        if level > 100:
+            level = 100
+        # HelvarNet levels are 0-100; send ints as ints to keep the wire clean.
+        if level == int(level):
+            level = int(level)
+
+        await self.router.send_command(
+            Command(
+                CommandType.DIRECT_LEVEL_GROUP,
+                [
+                    CommandParameter(CommandParameterType.GROUP, int(group_id)),
+                    CommandParameter(CommandParameterType.LEVEL, level),
+                    CommandParameter(CommandParameterType.FADE_TIME, fade_time),
+                ],
+            )
+        )
+
 
 async def get_groups(router):
 
@@ -188,9 +232,13 @@ async def get_groups(router):
         except (ValueError, TypeError):
             _LOGGER.error(f"Invalid block_scene value: {response.result}")
             return
-        scene_address = SceneAddress(
-            group_id, *blockscene_to_block_and_scene(block_scene)
-        )
+        block_and_scene = blockscene_to_block_and_scene(block_scene)
+        if block_and_scene is None:
+            _LOGGER.debug(
+                f"Group {group_id} has no last scene (C:109 returned {block_scene})."
+            )
+            return
+        scene_address = SceneAddress(group_id, *block_and_scene)
         await router.groups.handle_scene_callback(scene_address, 10)
 
     if not response.result:

@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from .parser.command import Command
+from .parser.command_parameter import CommandParameterType
 from .parser.command_type import (
     COMMAND_TYPES_DONT_LISTEN_FOR_RESPONSE,
     CommandType,
@@ -44,8 +45,21 @@ _LOGGER = logging.getLogger(__name__)
 
 COMMAND_TERMINATOR = b"#"
 
-# Error code returned for unsupported commands (see error_codes.py).
+# Error codes returned by the mock (see error_codes.py).
 UNSUPPORTED_COMMAND_ERROR = 15
+CLUSTER_DOES_NOT_EXIST_ERROR = 9
+MISSING_PARAMETER_ERROR = 17
+
+# C:109 sentinel: no scene recalled in the group since power-up.
+LAST_SCENE_NONE = 256
+
+
+def pack_version(major, minor, patch, build) -> int:
+    """Pack a version into the 32-bit int format C:190 replies with.
+
+    One byte per component, most significant first: 4.3.1.0 == 67305728.
+    """
+    return (major << 24) | (minor << 16) | (patch << 8) | build
 
 
 @dataclass
@@ -56,7 +70,14 @@ class FirmwareProfile:
       reply (simulating firmware that does not implement them).
     * ``results`` - canned reply payloads keyed by command id. Any supported
       command without an explicit entry is answered with an empty result, so the
-      mock never leaves a supported command unanswered.
+      mock never leaves a supported command unanswered. A value may also be a
+      dict for commands whose reply depends on the request:
+      - QUERY_ROUTERS (C:102): keyed by cluster id (from the request address);
+        unknown clusters get error 9, and a bare C:102 without an address gets
+        error 17 ("Missing ASCII parameter"), exactly like real firmware.
+      - QUERY_SCENE_NAMES (C:166) / QUERY_LAST_SCENE_IN_GROUP (C:109): keyed
+        by group id (from the G: parameter); the ``None`` key answers a bare
+        C:166, which real firmware answers with only a subset of names.
     * ``echo_address_on_error`` - whether error replies echo the request address.
       Real routers normally do; set False to simulate the pathological case where
       the address is dropped and a naive client can't match the reply.
@@ -72,6 +93,9 @@ class FirmwareProfile:
 # Command ids referenced below (kept inline for readability).
 _C_CLUSTERS = CommandType.QUERY_CLUSTERS.command_id  # 101
 _C_ROUTERS = CommandType.QUERY_ROUTERS.command_id  # 102
+_C_LAST_SCENE = CommandType.QUERY_LAST_SCENE_IN_GROUP.command_id  # 109
+_C_SCENE_NAMES = CommandType.QUERY_SCENE_NAMES.command_id  # 166
+_C_SCENE_INFO = CommandType.QUERY_SCENE_INFO.command_id  # 167
 _C_GROUP_DESC = CommandType.QUERY_GROUP_DESCRIPTION.command_id  # 105
 _C_DEVICE_DESC = CommandType.QUERY_DEVICE_DESCRIPTION.command_id  # 106
 _C_DEVICE_DISCOVERY = CommandType.QUERY_DEVICE_TYPES_AND_ADDRESSES.command_id  # 100
@@ -87,22 +111,50 @@ _C_DALI2_ENERGY = CommandType.QUERY_DALI2_ENERGY.command_id  # 252
 _C_DALI2_DIAGNOSTICS = CommandType.QUERY_DALI2_DIAGNOSTICS.command_id  # 253
 
 
+# A synthetic 136-entry device scene table (QUERY_SCENE_INFO, C:167).
+# Index (block-1)*16 + scene, "*" == ignore scene command. A handful of
+# scenes carry concrete levels so "unnamed but in use" logic can be tested.
+_SCENE_TABLE = ["*"] * 136
+_SCENE_TABLE[1] = "75"  # block 1, scene 1
+_SCENE_TABLE[2] = "50"  # block 1, scene 2
+_SCENE_TABLE[15] = "0"  # block 1, scene 15
+_SCENE_TABLE[16] = "0"  # block 1, scene 16
+_SCENE_TABLE[18] = "25"  # block 2, scene 2
+_SCENE_INFO_PAYLOAD = ",".join(_SCENE_TABLE)
+
+
 # Synthetic, generic reply payloads shared by the built-in profiles.
 _MODERN_RESULTS = {
     _C_WORKGROUP: "MockWorkgroup",
-    _C_ROUTER_VERSION: "5.4.2",
+    # C:190 replies with a packed 32-bit int (one byte per component), like
+    # real firmware: 5.4.2.0.
+    _C_ROUTER_VERSION: str(pack_version(5, 4, 2, 0)),
     _C_HELVARNET_VERSION: "2",
-    _C_CLUSTERS: "1",
-    _C_ROUTERS: "1,2",  # two routers in the cluster
+    _C_CLUSTERS: "0",
+    # Router ids per cluster; C:102 must be addressed "@<cluster>". Unknown
+    # clusters are answered with error 9, a bare C:102 with error 17.
+    _C_ROUTERS: {0: "1,2"},  # two routers in the cluster
     _C_GROUPS: "1,2",
     # type@device pairs; values are synthetic (a DALI load and a DALI switch).
     _C_DEVICE_DISCOVERY: "1@1,1@2",
-    _C_GROUP: "@1.1.1.1,@1.1.1.2",
+    _C_GROUP: "@0.1.1.1,@0.1.1.2",
     _C_GROUP_DESC: "Mock Group",
     _C_DEVICE_DESC: "Mock Device",
     _C_DEVICE_STATE: "0",
     _C_LOAD_LEVEL: "0.0",
     _C_ROUTER_TIME: "0",
+    _C_SCENE_INFO: _SCENE_INFO_PAYLOAD,
+    # Scene names per group, ",@"-separated like real firmware; one name
+    # deliberately contains ":". The bare (group-less) query returns only a
+    # subset, as observed on a real 910.
+    _C_SCENE_NAMES: {
+        None: "@1.1.1:Mock day",
+        1: "@1.1.1:Mock day,@1.1.2:Mock night: late",
+        2: "@2.1.1:Mock other",
+    },
+    # Last scene per group (C:109): (block-1)*16 + scene, 1-based scene;
+    # 71 == block 5 scene 7. Group 2 has recalled nothing since power-up.
+    _C_LAST_SCENE: {1: "71", 2: str(LAST_SCENE_NONE)},
     # Synthetic DALI-2 payloads; APPP is -1 (unsupported bank) to exercise sentinels.
     _C_DALI2_ENERGY: "ACTE:1.234,ACTP:5.678,APPE:4.321,APPP:-1,ACTEL:9.001,ACTPL:1.009",
     _C_DALI2_DIAGNOSTICS: "LSF:0,LSTL:-2,CGTL:42.0",
@@ -118,7 +170,8 @@ LEGACY = FirmwareProfile(
     results={
         _C_ROUTER_VERSION: "2.3.1",
         _C_HELVARNET_VERSION: "1",
-        _C_CLUSTERS: "1",
+        _C_CLUSTERS: "0",
+        _C_ROUTERS: {0: "1"},
     },
 )
 
@@ -165,6 +218,51 @@ class MockRouter:
     async def __aexit__(self, *exc) -> None:
         await self.stop()
 
+    def _error_response(self, command: Command, error_code: int) -> str:
+        address = command.command_address if self.profile.echo_address_on_error else None
+        response = Command(
+            command.command_type,
+            command_parameters=command.command_parameters,
+            command_message_type=MessageType.ERROR,
+            command_address=address,
+            command_result=str(error_code),
+        )
+        return str(response)
+
+    def _resolve_result(self, command: Command):
+        """Return the canned payload for a request, or an int error code.
+
+        Handles the request-dependent commands (see FirmwareProfile): C:102
+        keyed by cluster address, C:166/C:109 keyed by G: parameter.
+        """
+        command_id = command.command_type.command_id
+        result = self.profile.results.get(command_id, "")
+
+        if command_id == _C_ROUTERS:
+            # Real firmware requires the cluster as the address parameter.
+            if command.command_address is None:
+                return MISSING_PARAMETER_ERROR
+            cluster = int(command.command_address.block)
+            if isinstance(result, dict):
+                if cluster not in result:
+                    return CLUSTER_DOES_NOT_EXIST_ERROR
+                return result[cluster]
+            return result
+
+        if isinstance(result, dict):
+            group = command.get_param_value(CommandParameterType.GROUP)
+            if group is not None:
+                try:
+                    group = int(group)
+                except (TypeError, ValueError):
+                    return MISSING_PARAMETER_ERROR
+            if command_id == _C_LAST_SCENE:
+                # Unknown groups have recalled nothing since power-up.
+                return result.get(group, str(LAST_SCENE_NONE))
+            return result.get(group, "")
+
+        return result
+
     def build_response(self, command: Command) -> Optional[str]:
         """Return the wire string the mock would reply with, or None for no reply.
 
@@ -178,17 +276,12 @@ class MockRouter:
         command_id = command.command_type.command_id
 
         if command_id in self.profile.unsupported_commands:
-            address = command.command_address if self.profile.echo_address_on_error else None
-            response = Command(
-                command.command_type,
-                command_parameters=command.command_parameters,
-                command_message_type=MessageType.ERROR,
-                command_address=address,
-                command_result=str(self.profile.error_code),
-            )
-            return str(response)
+            return self._error_response(command, self.profile.error_code)
 
-        result = self.profile.results.get(command_id, "")
+        result = self._resolve_result(command)
+        if isinstance(result, int):
+            return self._error_response(command, result)
+
         response = Command(
             command.command_type,
             command_parameters=command.command_parameters,

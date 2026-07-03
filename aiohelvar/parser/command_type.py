@@ -30,6 +30,7 @@ class CommandType(Enum):
 
     # Commands
     DIRECT_LEVEL_DEVICE = (14, "Direct Level, Device")
+    DIRECT_LEVEL_GROUP = (13, "Direct Level, Group")
     RECALL_SCENE = (11, "Recall Scene")
 
     def __init__(self, command_id, description):
@@ -50,6 +51,7 @@ class CommandType(Enum):
 COMMAND_TYPES_DONT_LISTEN_FOR_RESPONSE = [
     CommandType.RECALL_SCENE,
     CommandType.DIRECT_LEVEL_DEVICE,
+    CommandType.DIRECT_LEVEL_GROUP,
 ]
 
 

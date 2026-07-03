@@ -1,5 +1,7 @@
 from .parser.address import SceneAddress
 from .parser.command import Command, CommandType
+from .parser.command_parameter import CommandParameter, CommandParameterType
+from .parser.command_type import MessageType
 import logging
 
 _LOGGER = logging.getLogger(__name__)
@@ -10,6 +12,18 @@ class Scene:
         self.name = name
         self.levels = levels
         self.address = scene_address
+
+    @property
+    def display_name(self) -> str:
+        """The router-stored name, or a generated fallback for unnamed scenes.
+
+        Routers frequently store no names at all; the fallback
+        "Scene <block>.<scene>" lets downstream consumers (e.g. Home
+        Assistant) list every scene regardless.
+        """
+        if self.name:
+            return self.name
+        return f"Scene {self.address.block}.{self.address.scene}"
 
     def __eq__(self, o: object) -> bool:
         return self.address == o.address
@@ -87,10 +101,102 @@ class Scenes:
 
         return named_scenes + unnamed_scenes
 
+    def get_selectable_scenes_for_group(self, group_id: int, include_unnamed=True):
+        """Return the scenes of a group that are worth presenting to a user.
+
+        Always contains the named scenes. With ``include_unnamed`` (the
+        default) it also contains unnamed scenes that are actually in use -
+        i.e. at least one device in the group stores a concrete level for them
+        in its scene table. That keeps the list meaningful even when the
+        router stores no scene names at all (use ``Scene.display_name`` for a
+        generated fallback name), without dumping all ~4000 theoretical
+        block/scene combinations on the user.
+
+        Sorted by scene address (block, then scene).
+        """
+        group_id = int(group_id)
+        scenes = [
+            scene
+            for scene in self.scenes.values()
+            if scene.address.group == group_id
+            and (
+                scene.name is not None
+                or (include_unnamed and self._scene_is_in_use(scene))
+            )
+        ]
+        scenes.sort(key=lambda x: (x.address.block, x.address.scene))
+        return scenes
+
+    def _scene_is_in_use(self, scene) -> bool:
+        """Whether any device in the scene's group has a level for the scene.
+
+        Scene-table entries of "*" mean "ignore scene command", so a scene
+        where every group device is "*" (or unknown) is not recallable in any
+        useful way and is not considered in use.
+        """
+        group = self.router.groups.groups.get(scene.address.group)
+        if group is None:
+            return False
+
+        index = scene.address.to_device_int()
+        for device_address in group.devices:
+            device = self.router.devices.devices.get(device_address)
+            if device is None or not device.is_load or not device.levels:
+                continue
+            if index >= len(device.levels):
+                continue
+            level = device.levels[index]
+            if level is None or str(level).strip() in ("", "*"):
+                continue
+            return True
+        return False
+
+
+def parse_scene_names(result):
+    """Parse a QUERY_SCENE_NAMES (C:166) reply payload.
+
+    The payload is a list of "@<group>.<block>.<scene>:<name>" entries
+    separated by ",@" - splitting on "@" alone leaves a trailing "," on every
+    name except the last. Names may themselves contain ":" (so the
+    address/name split happens only on the first colon) and ",".
+
+    Returns a dict of SceneAddress -> name. Malformed entries are logged and
+    skipped.
+    """
+    names = {}
+    if not result:
+        return names
+
+    try:
+        parts = result.strip().lstrip("@").split(",@")
+    except AttributeError:
+        _LOGGER.error(
+            "Response result is not a string - cannot parse scene names, no scenes added."
+        )
+        return names
+
+    for part in parts:
+        # Defensive: strip any comma left over from "@"-style splitting.
+        part = part.rstrip(",").strip()
+        if not part:
+            continue
+        sub_parts = part.split(":", 1)
+
+        try:
+            if len(sub_parts) < 2:
+                _LOGGER.warning(f"Invalid scene part format: {part}")
+                continue
+            scene_address = SceneAddress(*[int(a) for a in sub_parts[0].split(".")])
+            name = sub_parts[1].strip()
+            if name:
+                names[scene_address] = name
+        except (KeyError, ValueError, IndexError, TypeError) as e:
+            _LOGGER.error(f"Error parsing scene address {part}: {e}")
+
+    return names
+
 
 async def get_scenes(router, groups):
-
-    response = await router._send_command_task(Command(CommandType.QUERY_SCENE_NAMES))
 
     for group in groups.groups.values():
         for block in range(1, 254):
@@ -98,34 +204,35 @@ async def get_scenes(router, groups):
                 scene = Scene(SceneAddress(int(group.group_id), int(block), int(scene)))
                 router.scenes.register_scene(scene.address, scene)
 
-    # Check if response.result is None or empty
-    if not response or not response.result:
+    names = {}
+
+    # A bare C:166 is documented as "Query all scene names in group" and on
+    # real firmware (e.g. 910 / 4.3.1.0) returns only a subset of the named
+    # scenes. Query it anyway, then query per group with a G: parameter and
+    # merge the results.
+    response = await router._send_command_task(Command(CommandType.QUERY_SCENE_NAMES))
+    if response is None or response.command_message_type == MessageType.ERROR:
+        _LOGGER.warning(f"Bare QUERY_SCENE_NAMES (C:166) failed: {response}")
+    else:
+        names.update(parse_scene_names(response.result))
+
+    for group in groups.groups.values():
+        response = await router._send_command_task(
+            Command(
+                CommandType.QUERY_SCENE_NAMES,
+                [CommandParameter(CommandParameterType.GROUP, group.group_id)],
+            )
+        )
+        if response is None or response.command_message_type == MessageType.ERROR:
+            _LOGGER.warning(
+                f"QUERY_SCENE_NAMES (C:166) for group {group.group_id} failed: {response}"
+            )
+            continue
+        names.update(parse_scene_names(response.result))
+
+    if not names:
         _LOGGER.warning("No scene names returned from router")
         return
 
-    try:
-        parts = response.result.strip("@").split("@")
-    except AttributeError:
-        _LOGGER.error("Response result is not a string - cannot parse scene names, no scenes added.")
-        return
-
-    for part in parts:
-        if not part.strip():  # Skip empty parts
-            continue
-        sub_parts = part.split(":")
-
-        try:
-            if len(sub_parts) < 2:
-                _LOGGER.warning(f"Invalid scene part format: {part}")
-                continue
-            scene_address = SceneAddress(*[int(a) for a in sub_parts[0].split(".")])
-            router.scenes.update_scene_name(scene_address, sub_parts[1])
-        except (KeyError, ValueError, IndexError) as e:
-            _LOGGER.error(f"Error parsing scene address {part}: {e}")
-
-    # [router.scenes.register_scene(scene.address, scene) for scene in scenes]
-
-    # for group in groups:
-    #     router.groups.register_group(group)
-    #     asyncio.create_task(update_name(router, group.group_id))
-    #     asyncio.create_task(update_group_devices(router, group.group_id))
+    for scene_address, name in names.items():
+        router.scenes.update_scene_name(scene_address, name)

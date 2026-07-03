@@ -22,7 +22,7 @@ from aiohelvar.error_codes import (
     describe,
     is_unsupported_command,
 )
-from aiohelvar.mock_router import LEGACY, MODERN, FirmwareProfile, MockRouter
+from aiohelvar.mock_router import LEGACY, MODERN, FirmwareProfile, MockRouter, pack_version
 from aiohelvar.parser.address import HelvarAddress
 from aiohelvar.parser.command import Command
 from aiohelvar.parser.command_type import CommandType
@@ -115,9 +115,12 @@ async def test_diagnostics_modern_router():
 
     assert report.reachable is True
     assert report.workgroup_name == "MockWorkgroup"
-    assert report.router_version == "5.4.2"
+    # C:190 replies with a packed 32-bit int; the report decodes it.
+    assert report.router_version_raw == str(pack_version(5, 4, 2, 0))
+    assert report.router_version == "5.4.2.0"
     assert report.helvarnet_version == "2"
-    assert report.routers == "1,2"  # read-only C:102 report of routers in cluster
+    # C:102 is probed per discovered cluster, with the cluster as address.
+    assert report.routers == "@0: 1,2"
     assert report.supports_device_discovery is True
     level, _ = report.verdict()
     assert level == "ok"

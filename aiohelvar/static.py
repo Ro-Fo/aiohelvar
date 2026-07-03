@@ -1,4 +1,4 @@
-DEFAULT_FADE_TIME = 50  # ms
+DEFAULT_FADE_TIME = 50  # HelvarNet fade time units of 1/100 s (50 == 0.5 s)
 
 
 PROTOCOL = {
