@@ -6,15 +6,17 @@ This library written to support the (work in progress) [Helvar HomeAssistant int
 Features:
 * Manages the async TCP comms well, keeps the connection alive and listens to broadcast messages
 * Decodes the HelvarNet messages and translates things into Python objects that can easily be further translated into Home Assistant objects
-* Discovers and retrieves Devices, Groups & Scenes and and all their properties, state and values.
+* Discovers the router's cluster/router ids at runtime (C:101/C:102), so it works on any LAN addressing - no more reliance on the `10.254.C.R` IP convention
+* Discovers and retrieves Devices, Groups & Scenes and and all their properties, state and values. Scene names are merged from per-group queries, and unnamed scenes that are in use get a generated fallback name (`Scene <block>.<scene>`, see `Scene.display_name` and `Scenes.get_selectable_scenes_for_group`)
 * Keeps track of device states as scenes and devices change based on notifications from the router.
-* Calls the more useful commands to control or read status from the above.
+* Calls the more useful commands to control or read status from the above, including group scene recall and direct group levels (C:13, `Groups.set_group_level`) that also drive channels whose scene table entry is `*`.
 
 Very much a work in progress. Known TODOS:
 
-* Multi-cluster / multi-router support - device discovery still targets only the
-  router you connect to. The diagnostics *report* the other routers in the
-  cluster (QUERY_ROUTERS, C:102); enumerating devices across them is still TODO
+* Multi-router device discovery - the cluster/router ids are now discovered at
+  runtime (QUERY_CLUSTERS C:101 + QUERY_ROUTERS C:102) and the full topology is
+  available on `Router.clusters` / `Router.cluster_routers`, but device
+  discovery still enumerates only the first discovered cluster/router pair
 * Sensor support
 * Support relative changes to scene levels update commands
 * Full DALI-2 energy (C:252) / diagnostics (C:253) support - reply payloads are
@@ -87,11 +89,21 @@ async with MockRouter(LEGACY, port=0) as mock:
 
 ### Addressing & ports
 
-The HelvarNet `@cluster.router` address is derived from the router's IP using
-its *cluster mask* (Designer 5 Quick Start Guide §3.4). With the Helvar default
-mask `255.255.255.0` and the usual `10.254.C.R` layout, cluster = 3rd octet and
-router = 4th octet, which is what `Router` assumes by default. For other masks
-or when the router is reached on an unrelated IP (e.g. via a bridge), pass
+The HelvarNet `@cluster.router` ids are discovered from the router itself right
+after connecting: `QUERY_CLUSTERS` (C:101) lists the cluster ids, and
+`QUERY_ROUTERS` (C:102) - which real firmware requires to be addressed per
+cluster, `>V:2,C:102,@<cluster>#` (a bare C:102 returns error 17, "Missing
+ASCII parameter") - lists the routers in each. The first discovered pair is
+used for device discovery; the full topology is kept on `Router.clusters` and
+`Router.cluster_routers`.
+
+This makes the library work no matter how the router is addressed on the LAN.
+The old IP-octet heuristic (cluster = 3rd octet, router = 4th octet, correct
+only for the Helvar default cluster mask `255.255.255.0` with the usual
+`10.254.C.R` layout - Designer 5 Quick Start Guide §3.4) is kept only as a
+last-resort fallback if both discovery queries fail; on e.g. a `192.168.x.y`
+network it used to probe a non-existent cluster and device discovery failed
+with HelvarNet error 9 ("Cluster does not exist"). To force specific ids, pass
 `cluster_id`/`router_id` with `use_specified_ids=True`. Note the HelvarNet
 API/TCP port is `50000`; `60005` is the separate inter-router *cluster comms*
 port.
@@ -107,8 +119,10 @@ result = await router.query_dali2_energy(device_address)
 print(result.value("ACTE"), result.status("APPP"))  # e.g. 1.234, 'unsupported'
 ```
 
-The diagnostics also *report* the other routers in the cluster (QUERY_ROUTERS,
-C:102), though device discovery itself still targets only the connected router.
+The diagnostics also *report* the routers per discovered cluster (QUERY_ROUTERS,
+C:102, addressed `@<cluster>`), and decode the packed 32-bit router version
+that C:190 replies with (e.g. `67305728` -> `4.3.1.0`), though device discovery
+itself still targets only the first cluster/router pair.
 
 ## (Some of the) Known limitations 
 

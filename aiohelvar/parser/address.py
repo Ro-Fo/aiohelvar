@@ -10,16 +10,19 @@ class HelvarAddress:
 
     TODO: validate the above.
 
-    incomplete addresses are possible, but must include at least block and router
+    incomplete addresses are possible:
 
     @0.1
 
     block: 0
     router: 1
 
+    A cluster-only address (@c) is also valid - HelvarNet uses it as the
+    address parameter of QUERY_ROUTERS (C:102), e.g. ">V:2,C:102,@0#".
+
     """
 
-    def __init__(self, block: int, router: int, subnet = None, device = None):
+    def __init__(self, block: int, router: int = None, subnet = None, device = None):
 
         self.subnet = subnet
         self.device = device
@@ -27,7 +30,10 @@ class HelvarAddress:
         self.router = router
 
     def __str__(self, separator="."):
-        base = f"@{self.block}{separator}{self.router}"
+        base = f"@{self.block}"
+        if self.router is None:
+            return base
+        base = f"{base}{separator}{self.router}"
         if self.subnet:
             base = f"{base}{separator}{self.subnet}"
         if self.device:
@@ -53,9 +59,10 @@ class HelvarAddress:
     @router.setter
     def router(self, var):
 
-        var = int(var)
-        if var < 1 or var > 254:
-            raise TypeError("Router must be between 1 and 4.")
+        if var is not None:
+            var = int(var)
+            if var < 1 or var > 254:
+                raise TypeError("Router must be between 1 and 254 or None.")
         self.__router = var
 
     @property
@@ -109,7 +116,7 @@ class HelvarAddress:
         return True
 
     def __hash__(self):
-        return hash((int(self.block), int(self.router), int(self.subnet) if self.subnet is not None else None, self.device))
+        return hash((int(self.block), int(self.router) if self.router is not None else None, int(self.subnet) if self.subnet is not None else None, self.device))
 
     def __ne__(self, other):
         return not (self == other)

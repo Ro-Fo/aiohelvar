@@ -500,10 +500,13 @@ def test_scenes_none_response_handling():
     from aiohelvar.groups import Groups
     
     # Create a mock response with None result
+    from aiohelvar.parser.command_type import MessageType
+
     class MockResponse:
         def __init__(self, result=None):
             self.result = result
-    
+            self.command_message_type = MessageType.REPLY
+
     class MockRouter:
         def __init__(self):
             self.scenes = Scenes(self)

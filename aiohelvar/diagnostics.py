@@ -32,6 +32,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
 from .error_codes import coerce_error_code, describe, is_unsupported_command
+from .lib import parse_id_list
 from .parser.address import HelvarAddress
 from .parser.command import Command
 from .parser.command_type import CommandType, MessageType
@@ -41,6 +42,23 @@ _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_PORT = 50000
 DEFAULT_TIMEOUT = 5.0
+
+
+def decode_packed_version(raw) -> Optional[str]:
+    """Decode a QUERY_ROUTER_VERSION (C:190) packed 32-bit int.
+
+    Real firmware replies with one version component per byte, e.g.
+    67305728 == 0x04030100 == "4.3.1.0". Returns the dotted string, or None
+    if ``raw`` is not a plausible packed version (older firmware may already
+    reply with a dotted string - pass that through untouched via the caller).
+    """
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    if value < 0 or value > 0xFFFFFFFF:
+        return None
+    return ".".join(str((value >> shift) & 0xFF) for shift in (24, 16, 8, 0))
 
 
 class ProbeStatus(Enum):
@@ -132,8 +150,22 @@ class DiagnosticsReport:
         return self._result_if_ok(CMD_WORKGROUP)
 
     @property
-    def router_version(self) -> Optional[str]:
+    def router_version_raw(self) -> Optional[str]:
+        """The C:190 reply exactly as received (usually a packed 32-bit int)."""
         return self._result_if_ok(CMD_ROUTER_VERSION)
+
+    @property
+    def router_version(self) -> Optional[str]:
+        """The router version, decoded to dotted form where possible.
+
+        C:190 replies with a packed 32-bit int, one byte per component
+        (67305728 == "4.3.1.0"). Non-numeric replies pass through unchanged;
+        use :attr:`router_version_raw` for the wire value.
+        """
+        raw = self.router_version_raw
+        if raw is None:
+            return None
+        return decode_packed_version(raw) or raw
 
     @property
     def helvarnet_version(self) -> Optional[str]:
@@ -145,7 +177,18 @@ class DiagnosticsReport:
 
     @property
     def routers(self) -> Optional[str]:
-        return self._result_if_ok(CMD_ROUTERS)
+        """Router ids across all probed clusters, e.g. "@0: 1,2"."""
+        results = []
+        for probe in self.probes:
+            if probe.command_id == CMD_ROUTERS and probe.status == ProbeStatus.OK:
+                results.append(
+                    f"{probe.label.split(' ')[-1]}: {probe.result}"
+                    if " " in probe.label
+                    else str(probe.result)
+                )
+        if not results:
+            return None
+        return "; ".join(results)
 
     @property
     def supports_device_discovery(self) -> Optional[bool]:
@@ -208,6 +251,7 @@ class DiagnosticsReport:
             "connect_error": self.connect_error,
             "workgroup_name": self.workgroup_name,
             "router_version": self.router_version,
+            "router_version_raw": self.router_version_raw,
             "helvarnet_version": self.helvarnet_version,
             "clusters": self.clusters,
             "routers": self.routers,
@@ -227,7 +271,12 @@ class DiagnosticsReport:
         if self.reachable:
             for probe in self.probes:
                 if probe.status == ProbeStatus.OK:
-                    suffix = f"-> {probe.result}"
+                    result = probe.result
+                    if probe.command_id == CMD_ROUTER_VERSION:
+                        decoded = decode_packed_version(result)
+                        if decoded is not None and decoded != result:
+                            result = f"{decoded} (raw {result})"
+                    suffix = f"-> {result}"
                 else:
                     suffix = f"-> {probe.detail}" if probe.detail else ""
                 lines.append(f"{probe.label:<20}: {str(probe.status):<7} {suffix}".rstrip())
@@ -240,28 +289,34 @@ class DiagnosticsReport:
         return "\n".join(lines)
 
 
-# (label, command_id, needs_address) describing the read-only probe sequence.
+# (label, command_id) describing the read-only probes run before cluster
+# discovery. Routers (C:102) and device discovery are probed afterwards,
+# because both need an address parameter: C:102 requires the cluster as its
+# address on real firmware (a bare C:102 returns error 17, "Missing ASCII
+# parameter"), and device discovery probes @cluster.router.subnet.
 _PROBE_PLAN = [
-    ("Workgroup name", CMD_WORKGROUP, False),
-    ("Router version", CMD_ROUTER_VERSION, False),
-    ("HelvarNet version", CMD_HELVARNET_VERSION, False),
-    ("Clusters", CMD_CLUSTERS, False),
-    ("Routers", CMD_ROUTERS, False),
-    ("Groups", CMD_GROUPS, False),
-    ("Device discovery", CMD_DEVICE_DISCOVERY, True),
+    ("Workgroup name", CMD_WORKGROUP),
+    ("Router version", CMD_ROUTER_VERSION),
+    ("HelvarNet version", CMD_HELVARNET_VERSION),
+    ("Clusters", CMD_CLUSTERS),
 ]
 
 
-def _discovery_address(router: Router) -> HelvarAddress:
+def _discovery_address(router: Router, cluster=None, router_id=None) -> HelvarAddress:
     """Build a syntactically valid @cluster.router.subnet address to probe with.
 
-    The exact address does not matter for a capability probe: we only need to
-    tell "command not supported" (error 15) apart from "command understood"
-    (a reply or any other error). Values are clamped to valid ranges so we never
-    raise while constructing the address.
+    Prefers the ids discovered from the C:101/C:102 probes; falls back to the
+    Router's (heuristic) ids. The exact address does not matter for a
+    capability probe: we only need to tell "command not supported" (error 15)
+    apart from "command understood" (a reply or any other error). Values are
+    clamped to valid ranges so we never raise while constructing the address.
     """
-    cluster = router.cluster_id if 0 <= router.cluster_id <= 253 else 0
-    router_id = router.router_id if 1 <= router.router_id <= 254 else 1
+    if cluster is None:
+        cluster = router.cluster_id
+    if router_id is None:
+        router_id = router.router_id
+    cluster = cluster if 0 <= cluster <= 253 else 0
+    router_id = router_id if 1 <= router_id <= 254 else 1
     return HelvarAddress(cluster, router_id, 1)
 
 
@@ -321,9 +376,50 @@ async def run_diagnostics(
 
     report.reachable = True
     try:
-        for label, command_id, needs_address in _PROBE_PLAN:
+        for label, command_id in _PROBE_PLAN:
             command_type = CommandType.get_by_command_id(command_id)
-            address = _discovery_address(router) if needs_address else None
+            command = Command(command_type)
+            report.probes.append(await _probe(router, label, command, timeout))
+
+        # Routers must be queried per cluster: real firmware requires the
+        # cluster as the address parameter of C:102 (">V:2,C:102,@<c>#");
+        # a bare C:102 returns error 17 ("Missing ASCII parameter").
+        clusters_probe = report.get(CMD_CLUSTERS)
+        cluster_ids = []
+        if clusters_probe is not None and clusters_probe.status == ProbeStatus.OK:
+            cluster_ids = parse_id_list(clusters_probe.result)
+
+        first_pair = None
+        routers_type = CommandType.get_by_command_id(CMD_ROUTERS)
+        for cluster_id in cluster_ids:
+            command = Command(
+                routers_type, command_address=HelvarAddress(cluster_id)
+            )
+            probe = await _probe(router, f"Routers @{cluster_id}", command, timeout)
+            report.probes.append(probe)
+            if first_pair is None and probe.status == ProbeStatus.OK:
+                router_ids = parse_id_list(probe.result)
+                if router_ids:
+                    first_pair = (cluster_id, router_ids[0])
+        if not cluster_ids:
+            report.probes.append(
+                ProbeResult(
+                    "Routers",
+                    CMD_ROUTERS,
+                    ProbeStatus.SKIPPED,
+                    "no clusters discovered to query (C:102 needs @cluster)",
+                )
+            )
+
+        for label, command_id, address in (
+            ("Groups", CMD_GROUPS, None),
+            (
+                "Device discovery",
+                CMD_DEVICE_DISCOVERY,
+                _discovery_address(router, *(first_pair or (None, None))),
+            ),
+        ):
+            command_type = CommandType.get_by_command_id(command_id)
             command = Command(command_type, command_address=address)
             report.probes.append(await _probe(router, label, command, timeout))
     finally:

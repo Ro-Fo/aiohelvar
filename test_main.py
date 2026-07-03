@@ -538,21 +538,26 @@ class TestStaticUtilities:
         assert result == 1056816  # (0x10 << 16) + (0x20 << 8) + 0x30
     
     def test_blockscene_to_block_and_scene(self):
-        """Test block/scene conversion"""
+        """Test C:109 block/scene decoding (values verified on a 910 router)"""
         from aiohelvar.groups import blockscene_to_block_and_scene
-        
-        # Test various block/scene combinations
-        block, scene = blockscene_to_block_and_scene(17)  # Block 2, Scene 2
-        assert block == 2
-        assert scene == 2
-        
-        block, scene = blockscene_to_block_and_scene(1)   # Block 1, Scene 2
-        assert block == 1
-        assert scene == 2
-        
-        block, scene = blockscene_to_block_and_scene(16)  # Block 2, Scene 1
-        assert block == 2
-        assert scene == 1
+
+        # (block - 1) * 16 + scene with a 1-based scene.
+        assert blockscene_to_block_and_scene(71) == (5, 7)
+        assert blockscene_to_block_and_scene(15) == (1, 15)
+        assert blockscene_to_block_and_scene(16) == (1, 16)
+        assert blockscene_to_block_and_scene(18) == (2, 2)
+        assert blockscene_to_block_and_scene(1) == (1, 1)
+        assert blockscene_to_block_and_scene(17) == (2, 1)
+        assert blockscene_to_block_and_scene(128) == (8, 16)
+
+    def test_blockscene_sentinel_and_invalid_values(self):
+        """C:109 values >= 256 mean 'no scene since power-up' -> None"""
+        from aiohelvar.groups import blockscene_to_block_and_scene
+
+        assert blockscene_to_block_and_scene(256) is None
+        assert blockscene_to_block_and_scene(300) is None
+        assert blockscene_to_block_and_scene(0) is None
+        assert blockscene_to_block_and_scene(None) is None
 
 
 # Integration Tests
