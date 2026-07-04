@@ -1,4 +1,4 @@
-from aiohelvar.lib import Subscribable
+from aiohelvar.lib import Subscribable, guarded
 from aiohelvar.static import DEFAULT_FADE_TIME
 from aiohelvar.parser.address import HelvarAddress, SceneAddress
 import asyncio
@@ -194,6 +194,12 @@ async def get_groups(router):
                 [CommandParameter(CommandParameterType.GROUP, group_id)],
             )
         )
+        if response.command_message_type != MessageType.REPLY:
+            _LOGGER.warning(
+                f"QUERY_GROUP_DESCRIPTION for group {group_id} did not "
+                f"return a reply: {response}"
+            )
+            return
         router.groups.update_group_name(group_id, response.result)
 
     async def update_group_devices(router, group_id):
@@ -203,6 +209,14 @@ async def get_groups(router):
                 [CommandParameter(CommandParameterType.GROUP, group_id)],
             )
         )
+
+        if response.command_message_type != MessageType.REPLY:
+            # An error reply carries the error code as its result - don't
+            # parse it as a device list.
+            _LOGGER.warning(
+                f"QUERY_GROUP for group {group_id} did not return a reply: {response}"
+            )
+            return
 
         if response.result is not None:
             members = [member.strip("@") for member in response.result.split(",")]
@@ -222,10 +236,13 @@ async def get_groups(router):
         )
 
         if response.command_message_type != MessageType.REPLY:
-            if response.command_message_type != MessageType.ERROR:
-                _LOGGER.error(f"Error reply to command: {response}")
-                return
-            _LOGGER.error(f"Unexpected reply to command: {response}")
+            # An error reply carries the error code as its result - it must
+            # never be decoded as a block/scene value.
+            _LOGGER.warning(
+                f"QUERY_LAST_SCENE_IN_GROUP for group {group_id} did not "
+                f"return a reply: {response}"
+            )
+            return
 
         try:
             block_scene = int(response.result)
@@ -267,6 +284,24 @@ async def get_groups(router):
 
     for group in groups:
         router.groups.register_group(group)
-        asyncio.create_task(update_name(router, group.group_id))
-        asyncio.create_task(update_group_devices(router, group.group_id))
-        asyncio.create_task(update_group_last_scene(router, group.group_id))
+        asyncio.create_task(
+            guarded(
+                update_name(router, group.group_id),
+                f"Querying name of group {group.group_id}",
+                _LOGGER,
+            )
+        )
+        asyncio.create_task(
+            guarded(
+                update_group_devices(router, group.group_id),
+                f"Querying devices of group {group.group_id}",
+                _LOGGER,
+            )
+        )
+        asyncio.create_task(
+            guarded(
+                update_group_last_scene(router, group.group_id),
+                f"Querying last scene of group {group.group_id}",
+                _LOGGER,
+            )
+        )

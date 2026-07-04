@@ -88,6 +88,9 @@ class FirmwareProfile:
     results: Dict[int, str] = field(default_factory=dict)
     error_code: int = UNSUPPORTED_COMMAND_ERROR
     echo_address_on_error: bool = True
+    # Command ids the mock never answers - simulates a router that silently
+    # drops a query, for testing client-side timeouts.
+    silent_commands: frozenset = frozenset()
 
 
 # Command ids referenced below (kept inline for readability).
@@ -137,7 +140,9 @@ _MODERN_RESULTS = {
     _C_GROUPS: "1,2",
     # type@device pairs; values are synthetic (a DALI load and a DALI switch).
     _C_DEVICE_DISCOVERY: "1@1,1@2",
-    _C_GROUP: "@0.1.1.1,@0.1.1.2",
+    # Devices per group (C:164 carries the group as its G: parameter). The
+    # payloads differ so tests can detect replies matched to the wrong query.
+    _C_GROUP: {1: "@0.1.1.1,@0.1.1.2", 2: "@0.1.1.2"},
     _C_GROUP_DESC: "Mock Group",
     _C_DEVICE_DESC: "Mock Device",
     _C_DEVICE_STATE: "0",
@@ -274,6 +279,9 @@ class MockRouter:
             return None
 
         command_id = command.command_type.command_id
+
+        if command_id in self.profile.silent_commands:
+            return None
 
         if command_id in self.profile.unsupported_commands:
             return self._error_response(command, self.profile.error_code)

@@ -71,10 +71,15 @@ class Command:
 
     @property
     def type_parameters_address(self):
+        """Key used to match a reply to its request.
 
-        # return (self.command_type, self.command_parameters, self.command_address)
-
-        parameters = []
+        Replies echo the command id, parameters and address of the query, so
+        all three are part of the key. Matching on the command type alone
+        (as older versions did) let concurrent queries of the same type steal
+        each other's replies - e.g. two QUERY_GROUP (C:164) requests for
+        different G: parameters.
+        """
+        parameters = list(self.command_parameters)
         if self.command_address is not None:
             parameters.append(self.command_address)
 

@@ -1,10 +1,17 @@
+from .exceptions import CommandResponseTimeout
 from .parser.address import SceneAddress
 from .parser.command import Command, CommandType
 from .parser.command_parameter import CommandParameter, CommandParameterType
 from .parser.command_type import MessageType
+import asyncio
 import logging
 
 _LOGGER = logging.getLogger(__name__)
+
+# Scene names are queried once per group during initialisation. Bound each
+# query so a router that leaves one unanswered can't stall start-up for the
+# full (much larger) command timeout per group.
+SCENE_NAME_QUERY_TIMEOUT = 15
 
 
 class Scene:
@@ -196,6 +203,35 @@ def parse_scene_names(result):
     return names
 
 
+async def _query_scene_names(router, group_id=None):
+    """Query C:166 (optionally per group) and return the parsed name dict.
+
+    Failures - error replies, timeouts, an unanswered query - are logged and
+    yield an empty dict so that scene-name collection can never stall or
+    abort the router initialisation.
+    """
+    parameters = []
+    label = "Bare QUERY_SCENE_NAMES (C:166)"
+    if group_id is not None:
+        parameters = [CommandParameter(CommandParameterType.GROUP, group_id)]
+        label = f"QUERY_SCENE_NAMES (C:166) for group {group_id}"
+
+    try:
+        response = await router.query(
+            Command(CommandType.QUERY_SCENE_NAMES, parameters),
+            timeout=SCENE_NAME_QUERY_TIMEOUT,
+        )
+    except (asyncio.TimeoutError, CommandResponseTimeout):
+        _LOGGER.warning(f"{label} was not answered within {SCENE_NAME_QUERY_TIMEOUT}s.")
+        return {}
+
+    if response is None or response.command_message_type == MessageType.ERROR:
+        _LOGGER.warning(f"{label} failed: {response}")
+        return {}
+
+    return parse_scene_names(response.result)
+
+
 async def get_scenes(router, groups):
 
     for group in groups.groups.values():
@@ -210,25 +246,10 @@ async def get_scenes(router, groups):
     # real firmware (e.g. 910 / 4.3.1.0) returns only a subset of the named
     # scenes. Query it anyway, then query per group with a G: parameter and
     # merge the results.
-    response = await router._send_command_task(Command(CommandType.QUERY_SCENE_NAMES))
-    if response is None or response.command_message_type == MessageType.ERROR:
-        _LOGGER.warning(f"Bare QUERY_SCENE_NAMES (C:166) failed: {response}")
-    else:
-        names.update(parse_scene_names(response.result))
+    names.update(await _query_scene_names(router))
 
     for group in groups.groups.values():
-        response = await router._send_command_task(
-            Command(
-                CommandType.QUERY_SCENE_NAMES,
-                [CommandParameter(CommandParameterType.GROUP, group.group_id)],
-            )
-        )
-        if response is None or response.command_message_type == MessageType.ERROR:
-            _LOGGER.warning(
-                f"QUERY_SCENE_NAMES (C:166) for group {group.group_id} failed: {response}"
-            )
-            continue
-        names.update(parse_scene_names(response.result))
+        names.update(await _query_scene_names(router, group.group_id))
 
     if not names:
         _LOGGER.warning("No scene names returned from router")
