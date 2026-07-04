@@ -196,6 +196,7 @@ class MockRouter:
         self.host = host
         self.port = port
         self._server: Optional[asyncio.AbstractServer] = None
+        self._client_writers: List[asyncio.StreamWriter] = []
         # Every command received, for assertions in tests (e.g. read-only checks).
         self.received_commands: List[Command] = []
 
@@ -215,6 +216,12 @@ class MockRouter:
             self._server.close()
             await self._server.wait_closed()
             self._server = None
+            # Also drop connected clients - closing only the listener would
+            # leave established connections alive, which is not how a router
+            # reboot behaves.
+            for writer in list(self._client_writers):
+                writer.close()
+            self._client_writers.clear()
             _LOGGER.info("Mock router stopped.")
 
     async def __aenter__(self) -> "MockRouter":
@@ -302,6 +309,7 @@ class MockRouter:
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         peer = writer.get_extra_info("peername")
         _LOGGER.debug("Mock router: client connected from %s", peer)
+        self._client_writers.append(writer)
         parser = CommandParser()
         try:
             while True:
@@ -333,6 +341,8 @@ class MockRouter:
             raise
         finally:
             _LOGGER.debug("Mock router: client %s disconnected", peer)
+            if writer in self._client_writers:
+                self._client_writers.remove(writer)
             writer.close()
 
     async def serve_forever(self, profile_cycle: Optional[List[FirmwareProfile]] = None) -> None:

@@ -5,14 +5,14 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setuptools.setup(
     name="aiohelvar",
-    version="0.11.1",
+    version="0.11.2",
     author="Tom Playford",
     description="Async HelvarNet communication and control library.",
     long_description=long_description,
     license="Apache 2.0",
     long_description_content_type="text/markdown",
     url="https://github.com/Ro-Fo/aiohelvar",
-    download_url="https://github.com/Ro-Fo/aiohelvar/archive/refs/tags/v0.11.1.tar.gz",
+    download_url="https://github.com/Ro-Fo/aiohelvar/archive/refs/tags/v0.11.2.tar.gz",
     project_urls={
         "Bug Tracker": "https://github.com/Ro-Fo/aiohelvar/issues",
     },
