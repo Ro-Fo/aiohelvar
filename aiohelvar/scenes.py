@@ -3,15 +3,9 @@ from .parser.address import SceneAddress
 from .parser.command import Command, CommandType
 from .parser.command_parameter import CommandParameter, CommandParameterType
 from .parser.command_type import MessageType
-import asyncio
 import logging
 
 _LOGGER = logging.getLogger(__name__)
-
-# Scene names are queried once per group during initialisation. Bound each
-# query so a router that leaves one unanswered can't stall start-up for the
-# full (much larger) command timeout per group.
-SCENE_NAME_QUERY_TIMEOUT = 15
 
 
 class Scene:
@@ -208,7 +202,10 @@ async def _query_scene_names(router, group_id=None):
 
     Failures - error replies, timeouts, an unanswered query - are logged and
     yield an empty dict so that scene-name collection can never stall or
-    abort the router initialisation.
+    abort the router initialisation. The response timeout is handled by the
+    router's command machinery and starts when the command is actually sent
+    (commands may queue for an in-flight slot while the router works through
+    the initialisation backlog).
     """
     parameters = []
     label = "Bare QUERY_SCENE_NAMES (C:166)"
@@ -217,12 +214,11 @@ async def _query_scene_names(router, group_id=None):
         label = f"QUERY_SCENE_NAMES (C:166) for group {group_id}"
 
     try:
-        response = await router.query(
-            Command(CommandType.QUERY_SCENE_NAMES, parameters),
-            timeout=SCENE_NAME_QUERY_TIMEOUT,
+        response = await router._send_command_task(
+            Command(CommandType.QUERY_SCENE_NAMES, parameters)
         )
-    except (asyncio.TimeoutError, CommandResponseTimeout):
-        _LOGGER.warning(f"{label} was not answered within {SCENE_NAME_QUERY_TIMEOUT}s.")
+    except CommandResponseTimeout:
+        _LOGGER.warning(f"{label} was not answered in time.")
         return {}
 
     if response is None or response.command_message_type == MessageType.ERROR:

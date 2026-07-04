@@ -19,7 +19,14 @@ class CommandParser:
 
     def parse_command(self, input: bytes):
 
-        input = input.decode()
+        try:
+            input = input.decode()
+        except UnicodeDecodeError:
+            # Routers may send names (groups, devices, scenes) in a legacy
+            # 8-bit encoding rather than UTF-8 - e.g. "Küche" as b"K\xfcche".
+            # Latin-1 maps every byte, so this can never raise; a wrong guess
+            # merely garbles a name instead of killing response processing.
+            input = input.decode("latin-1")
         r = re.compile(command_regex)
         match = r.fullmatch(input)
 

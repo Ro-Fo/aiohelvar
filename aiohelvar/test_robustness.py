@@ -117,9 +117,7 @@ class TestSilentRouter:
 
     @pytest.mark.asyncio
     async def test_get_scenes_survives_unanswered_scene_name_queries(self, monkeypatch):
-        import aiohelvar.scenes as scenes_module
-
-        monkeypatch.setattr(scenes_module, "SCENE_NAME_QUERY_TIMEOUT", 0.5)
+        monkeypatch.setattr(router_module, "COMMAND_RESPONSE_TIMEOUT", 0.5)
         profile = FirmwareProfile(
             name="silent-scene-names",
             results=dict(MODERN.results),
@@ -222,3 +220,150 @@ class TestErrorReplies:
                 await router.disconnect()
 
         assert router.devices.devices == {}
+
+
+# --- flood control ----------------------------------------------------------
+
+
+class TestFloodControl:
+    @pytest.mark.asyncio
+    async def test_concurrent_commands_are_throttled(self, monkeypatch):
+        """No more than MAX_CONCURRENT_COMMANDS queries may be in flight.
+
+        Reproduces the mass-timeout seen on a real site with ~20 groups and
+        60+ devices: hundreds of concurrent start-up queries flooded the
+        router until replies arrived late or not at all.
+        """
+        monkeypatch.setattr(router_module, "COMMAND_RESPONSE_TIMEOUT", 1)
+        profile = FirmwareProfile(
+            name="silent-state",
+            results=dict(MODERN.results),
+            silent_commands=frozenset({CommandType.QUERY_DEVICE_STATE.command_id}),
+        )
+        async with MockRouter(profile, port=0) as mock:
+            router = Router(mock.host, mock.port)
+            await router.open()
+            try:
+                queries = [
+                    asyncio.create_task(
+                        router._send_command_task(
+                            Command(
+                                CommandType.QUERY_DEVICE_STATE,
+                                command_address=HelvarAddress(0, 1, 1, device),
+                            )
+                        )
+                    )
+                    for device in range(1, 11)
+                ]
+                # Give the writer time to send everything it is allowed to.
+                await asyncio.sleep(0.5)
+                in_flight = [
+                    c
+                    for c in mock.received_commands
+                    if c.command_type is CommandType.QUERY_DEVICE_STATE
+                ]
+                assert len(in_flight) == router_module.MAX_CONCURRENT_COMMANDS
+
+                results = await asyncio.gather(*queries, return_exceptions=True)
+                assert all(isinstance(r, CommandResponseTimeout) for r in results)
+            finally:
+                await router.disconnect()
+
+
+# --- reader robustness ------------------------------------------------------
+
+
+async def _start_raw_server(payloads):
+    """A one-shot TCP server that answers the first read with ``payloads``."""
+
+    async def handle(reader, writer):
+        await reader.readuntil(b"#")
+        for payload in payloads:
+            writer.write(payload)
+        await writer.drain()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    return server, server.sockets[0].getsockname()[1]
+
+
+class TestReaderRobustness:
+    def test_parser_decodes_legacy_8bit_names(self):
+        # "Küche" in latin-1 - not valid UTF-8. Must not raise.
+        command = CommandParser().parse_command(b"?V:2,C:106,@0.1.1.1=K\xfcche#")
+        assert command.result == "Küche"
+
+    @pytest.mark.asyncio
+    async def test_reader_survives_garbage_and_legacy_encoding(self):
+        """Unparseable lines and non-UTF-8 bytes must not kill the reader."""
+        server, port = await _start_raw_server(
+            [
+                b"\xff\xfe***garbage***#",  # undecodable + unparseable line
+                b"?V:2,C:107=K\xfcche#",  # latin-1 reply to the actual query
+            ]
+        )
+        try:
+            router = Router("127.0.0.1", port)
+            await router.open()
+            try:
+                response = await router.query(
+                    Command(CommandType.QUERY_WORKGROUP_NAME), timeout=5
+                )
+                assert response.result == "Küche"
+            finally:
+                await router.disconnect()
+        finally:
+            server.close()
+            await server.wait_closed()
+
+
+# --- automatic reconnect ----------------------------------------------------
+
+
+class TestAutoReconnect:
+    @pytest.mark.asyncio
+    async def test_connection_loss_triggers_reconnect(self, monkeypatch):
+        monkeypatch.setattr(router_module, "RECONNECT_RETRY_DELAY", 0.2)
+
+        mock = await MockRouter(MODERN, port=0).start()
+        port = mock.port
+        router = Router(mock.host, port)
+        await router.connect()
+        assert router.connected is True
+
+        # Simulate a router reboot: drop the connection, come back later.
+        await mock.stop()
+        assert await _wait_for(lambda: router.connected is False)
+
+        mock2 = await MockRouter(MODERN, host=mock.host, port=port).start()
+        try:
+            assert await _wait_for(lambda: router.connected is True)
+            # The reconnected session works: queries get answered again.
+            response = await router.query(
+                Command(CommandType.QUERY_WORKGROUP_NAME), timeout=5
+            )
+            assert response.result == "MockWorkgroup"
+        finally:
+            await router.disconnect()
+            await mock2.stop()
+
+    @pytest.mark.asyncio
+    async def test_deliberate_disconnect_stops_reconnect_attempts(self, monkeypatch):
+        monkeypatch.setattr(router_module, "RECONNECT_RETRY_DELAY", 0.2)
+
+        mock = await MockRouter(MODERN, port=0).start()
+        router = Router(mock.host, mock.port)
+        await router.connect()
+
+        # Drop the connection and let the retry loop start (the mock stays
+        # down, so it keeps retrying).
+        await mock.stop()
+        assert await _wait_for(
+            lambda: router._reconnect_task is not None
+            and not router._reconnect_task.done()
+        )
+
+        await router.disconnect()
+        assert await _wait_for(
+            lambda: router._reconnect_task.done() or router._reconnect_task.cancelled()
+        )
+        assert router.connected is False

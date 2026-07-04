@@ -32,6 +32,20 @@ KEEP_ALIVE_PERIOD = 120
 # Discovery must never hang a connection attempt for the full command timeout.
 DISCOVERY_TIMEOUT = 10
 
+# Routers are embedded devices that answer queries one at a time; flooding one
+# with hundreds of concurrent queries (initialisation of a site with dozens of
+# devices/groups) makes it fall behind until replies arrive after the timeout
+# or not at all. Commands therefore share a small pool of in-flight slots.
+MAX_CONCURRENT_COMMANDS = 4
+
+# How long to wait between reconnect attempts after the connection drops.
+RECONNECT_RETRY_DELAY = 10
+
+# Unmatched (usually late) replies are pruned by the keepalive so they cannot
+# accumulate forever. Far above the in-flight limit, so replies that are just
+# slow still get matched.
+MAX_UNMATCHED_REPLIES = 32
+
 
 class Router:
     """Control a Helvar Router."""
@@ -96,7 +110,16 @@ class Router:
         self.commands_received = []
         self.command_received = asyncio.Condition()
 
+        # Limit in-flight commands so router initialisation on large sites
+        # doesn't flood the router - see MAX_CONCURRENT_COMMANDS.
+        self._command_slots = asyncio.Semaphore(MAX_CONCURRENT_COMMANDS)
+
         self.connected = False
+
+        # True while a deliberate disconnect is in progress/complete;
+        # suppresses automatic reconnection.
+        self._closing = False
+        self._reconnect_task = None
 
         # Connection state. Populated by open()/connect(); initialised here so
         # that disconnect() is safe to call even if we never connected.
@@ -178,6 +201,7 @@ class Router:
     async def connect(self):
         _LOGGER.debug("Connecting...")
 
+        self._closing = False
         await self.open()
 
         # Read the workgroup name:
@@ -289,6 +313,17 @@ class Router:
 
     async def disconnect(self):
         _LOGGER.info("Disconnecting...")
+        self._closing = True
+
+        # Stop a pending automatic reconnect (unless we *are* the reconnect
+        # task, which calls disconnect() as part of reconnecting).
+        if (
+            self._reconnect_task is not None
+            and not self._reconnect_task.done()
+            and self._reconnect_task is not asyncio.current_task()
+        ):
+            self._reconnect_task.cancel()
+
         tasks = [
             self._stream_reader_task,
             self._stream_writer_task,
@@ -301,30 +336,74 @@ class Router:
 
         if self._writer is not None:
             self._writer.close()
-            await self._writer.wait_closed()
+            try:
+                await self._writer.wait_closed()
+            except (ConnectionError, OSError):
+                # The connection may already be gone - that's why we're here.
+                pass
         self.connected = False
         _LOGGER.info("Disconnected.")
 
+    def _start_reconnect(self):
+        """Schedule an automatic reconnect after the connection was lost."""
+        if self._closing:
+            return
+        if self._reconnect_task is not None and not self._reconnect_task.done():
+            return
+        self.connected = False
+        _LOGGER.warning("Connection to the router was lost. Reconnecting...")
+        self._reconnect_task = asyncio.create_task(self._reconnect_with_retries())
+
+    async def _reconnect_with_retries(self):
+        """Reconnect, retrying every RECONNECT_RETRY_DELAY seconds.
+
+        Runs until the connection is back or the router is deliberately
+        disconnected. Consumers (e.g. Home Assistant entities) can use
+        ``self.connected`` to report availability in the meantime.
+        """
+        while not self._closing:
+            try:
+                await self.reconnect()
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:  # pylint: disable=broad-except
+                _LOGGER.warning(
+                    f"Reconnect to {self.host}:{self.port} failed ({err!r}). "
+                    f"Retrying in {RECONNECT_RETRY_DELAY}s..."
+                )
+                await asyncio.sleep(RECONNECT_RETRY_DELAY)
+            else:
+                _LOGGER.info("Reconnected to the router.")
+                return
+
     async def _keep_alive(self):
-        """Keep the TCP connection alive. This'll also clean up any stale command futures."""
+        """Keep the TCP connection alive and prune stale unmatched replies."""
 
         def _keep_alive_callback(task):
 
+            if task.cancelled():
+                return
             if task.exception():
-                _LOGGER.warn(
-                    f"Keep alive encountered an exception: {task.exception()}."
+                _LOGGER.warning(
+                    f"Keep alive encountered an exception: {task.exception()!r}."
                 )
                 if isinstance(task.exception(), CommandResponseTimeout):
-                    # Timeout - reconnect.
-                    _LOGGER.warn("Keepalive didn't - reconnecting...")
-                    asyncio.create_task(self.reconnect())
-                    return
-                else:
-                    raise (task.exception())
+                    # Timeout - reconnect (with retries).
+                    _LOGGER.warning("Keepalive didn't - reconnecting...")
+                    self._start_reconnect()
+                return
             _LOGGER.debug("Keepalive kept the router TCP connection alive.")
 
         while True:
             await asyncio.sleep(KEEP_ALIVE_PERIOD)
+
+            # Replies that no waiter ever matched (usually replies that
+            # arrived after their query timed out) must not pile up forever.
+            stale = len(self.commands_received) - MAX_UNMATCHED_REPLIES
+            if stale > 0:
+                _LOGGER.debug(f"Pruning {stale} stale unmatched replies.")
+                del self.commands_received[:stale]
+
             keepalive = await self.send_command(Command(CommandType.QUERY_ROUTER_TIME))
 
             keepalive.add_done_callback(_keep_alive_callback)
@@ -334,7 +413,18 @@ class Router:
         parser = CommandParser()
 
         while True:
-            line = await reader.readuntil(COMMAND_TERMINATOR)
+            try:
+                line = await reader.readuntil(COMMAND_TERMINATOR)
+            except asyncio.CancelledError:
+                raise
+            except (asyncio.IncompleteReadError, ConnectionError, OSError) as err:
+                # Connection dropped (router reboot, network blip). Trigger an
+                # automatic reconnect instead of dying silently - a dead
+                # reader used to leave every future query timing out.
+                _LOGGER.warning(f"Reading from the router failed: {err!r}")
+                self._start_reconnect()
+                return
+
             if line is not None:
 
                 _LOGGER.debug(f"Received line: {line}")
@@ -349,8 +439,12 @@ class Router:
                         command = parser.parse_command(splitline)
                     except ParserError as e:
                         _LOGGER.error(f"Exception handling line from router: {e}")
-                    except Exception as e:
-                        raise e
+                    except Exception as e:  # pylint: disable=broad-except
+                        # One malformed line must never kill the reader task -
+                        # that would silently stop all response processing.
+                        _LOGGER.error(
+                            f"Unexpected error parsing line {splitline!r} from router: {e!r}"
+                        )
                     else:
                         _LOGGER.info(f"Received command: {command}")
 
@@ -368,10 +462,18 @@ class Router:
         while True:
             command_string = await self.commands_to_send.get()
             _LOGGER.info(f"Sending command '{command_string}'...")
-            writer.write(command_string)
-            # Small buffer. It's possible to overload a router.
-            await asyncio.sleep(0.01)
-            await writer.drain()
+            try:
+                writer.write(command_string)
+                # Small buffer. It's possible to overload a router.
+                await asyncio.sleep(0.01)
+                await writer.drain()
+            except asyncio.CancelledError:
+                raise
+            except (ConnectionError, OSError) as err:
+                _LOGGER.warning(f"Writing to the router failed: {err!r}")
+                self.commands_to_send.task_done()
+                self._start_reconnect()
+                return
             self.commands_to_send.task_done()
 
     async def wait_for_pending_replies(self):
@@ -415,6 +517,16 @@ class Router:
         await get_scenes(self, self.groups)
 
     async def _send_command_task(self, command: Command):
+
+        # Take an in-flight slot before sending: routers answer queries one at
+        # a time, and initialising a large site fires hundreds of queries at
+        # once. Without this the router falls behind until replies arrive
+        # after the timeout (or not at all). The response timeout starts once
+        # the command is actually sent, not while waiting for a slot.
+        async with self._command_slots:
+            return await self._send_command_locked(command)
+
+    async def _send_command_locked(self, command: Command):
 
         start_time = datetime.datetime.now()
 
