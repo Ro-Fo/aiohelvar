@@ -1,4 +1,6 @@
-from aiohelvar.lib import Subscribable
+from aiohelvar.lib import Subscribable, guarded
+from .error_codes import describe
+from .parser.command_type import MessageType
 from .static import (
     DALI_TYPES,
     DEVICE_STATE_FLAGS,
@@ -333,17 +335,44 @@ class Devices:
             )
             self.update_device_scene_level(device.address, response.result)
 
-        asyncio.create_task(update_name(device))
-        asyncio.create_task(update_state(device))
+        asyncio.create_task(
+            guarded(update_name(device), f"Querying name of device {address}", _LOGGER)
+        )
+        asyncio.create_task(
+            guarded(update_state(device), f"Querying state of device {address}", _LOGGER)
+        )
 
         if device.is_load:
-            asyncio.create_task(update_load_level(device))
-            asyncio.create_task(update_scene_level(device))
+            asyncio.create_task(
+                guarded(
+                    update_load_level(device),
+                    f"Querying load level of device {address}",
+                    _LOGGER,
+                )
+            )
+            asyncio.create_task(
+                guarded(
+                    update_scene_level(device),
+                    f"Querying scene table of device {address}",
+                    _LOGGER,
+                )
+            )
 
 
 async def receive_and_register_devices(router, command):
 
+    subnet_address = command.command_address
     command = await router._send_command_task(command)
+
+    if command.command_message_type == MessageType.ERROR:
+        # Probing all four subnets is expected to error on subnets the router
+        # doesn't have (e.g. S-DIM/DMX on a 910: error on @c.r.3 / @c.r.4).
+        _LOGGER.info(
+            f"No devices on subnet {subnet_address}: router returned error "
+            f"{command.result} ({describe(command.result)})."
+        )
+        return
+
     if command.result is None:
         _LOGGER.info("No devices found.")
         return
@@ -371,14 +400,18 @@ async def get_devices(router):
 
     [
         asyncio.create_task(
-            receive_and_register_devices(
-                router,
-                Command(
-                    CommandType.QUERY_DEVICE_TYPES_AND_ADDRESSES,
-                    command_address=HelvarAddress(
-                        router.cluster_id, router.router_id, subnet_id
+            guarded(
+                receive_and_register_devices(
+                    router,
+                    Command(
+                        CommandType.QUERY_DEVICE_TYPES_AND_ADDRESSES,
+                        command_address=HelvarAddress(
+                            router.cluster_id, router.router_id, subnet_id
+                        ),
                     ),
                 ),
+                f"Discovering devices on subnet {subnet_id}",
+                _LOGGER,
             )
         )
         for subnet_id in range(1, 5)

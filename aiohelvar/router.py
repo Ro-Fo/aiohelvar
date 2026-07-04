@@ -432,7 +432,10 @@ class Router:
                     # We can safely remove ourselves from list as we stop iterating.
 
                     if r_command.command_message_type == MessageType.ERROR:
-                        _LOGGER.error(
+                        # Callers decide how serious an error reply is - e.g.
+                        # probing all four subnets for devices is *expected* to
+                        # error on subnets the router doesn't have.
+                        _LOGGER.warning(
                             f"Request command {command} triggered an error back from the router: {r_command}."
                         )
 
@@ -451,12 +454,24 @@ class Router:
         async with self.command_received:
             while response is None:
 
-                if datetime.datetime.now() > (
-                    start_time + datetime.timedelta(0, COMMAND_RESPONSE_TIMEOUT)
-                ):
+                remaining = (
+                    start_time
+                    + datetime.timedelta(0, COMMAND_RESPONSE_TIMEOUT)
+                    - datetime.datetime.now()
+                ).total_seconds()
+                if remaining <= 0:
                     raise CommandResponseTimeout(command)
 
-                await self.command_received.wait()
+                # Bound the wait so the timeout fires even when the router
+                # goes silent - a bare Condition.wait() only wakes when some
+                # other message arrives, which used to stall unanswered
+                # queries until the next keepalive.
+                try:
+                    await asyncio.wait_for(
+                        self.command_received.wait(), remaining
+                    )
+                except asyncio.TimeoutError:
+                    raise CommandResponseTimeout(command) from None
 
                 response = check_for_command_response()
                 if response:

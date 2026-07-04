@@ -1,4 +1,25 @@
 import asyncio
+import logging
+
+_LOGGER = logging.getLogger(__name__)
+
+
+async def guarded(coro, what, logger=None):
+    """Await ``coro``, logging failures instead of letting them escape.
+
+    For fire-and-forget tasks (asyncio.create_task) an uncaught exception is
+    only reported as "Task exception was never retrieved" long after the
+    fact. Wrapping the coroutine keeps one slow or unanswered query (e.g. a
+    CommandResponseTimeout) from crashing initialisation while still leaving
+    a clear log line. CancelledError is re-raised so shutdown still works.
+    """
+    try:
+        return await coro
+    except asyncio.CancelledError:
+        raise
+    except Exception as err:  # pylint: disable=broad-except
+        (logger or _LOGGER).warning(f"{what} failed: {err!r}")
+        return None
 
 
 def parse_id_list(result):

@@ -511,9 +511,12 @@ def test_scenes_none_response_handling():
         def __init__(self):
             self.scenes = Scenes(self)
             self.groups = Groups(self)
-        
+
         async def _send_command_task(self, command):
             return MockResponse(None)  # Simulate None response
+
+        async def query(self, command, timeout=None):
+            return await self._send_command_task(command)
     
     # Test should not raise AttributeError
     import asyncio
